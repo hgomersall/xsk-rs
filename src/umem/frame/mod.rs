@@ -43,6 +43,10 @@ impl SegmentLengths {
     }
 }
 
+/// This option will be set on all but the last `FrameDesc` if multi-buffer
+/// is enabled. Check this to determine if more fragments exist for this packet.
+const XDP_PKT_CONTD: u32 = 1 << 0;
+
 /// A [`Umem`](super::Umem) frame descriptor.
 ///
 /// Used to pass frame information between the kernel and
@@ -95,6 +99,13 @@ impl FrameDesc {
     #[inline]
     pub fn set_options(&mut self, options: u32) {
         self.options = options
+    }
+
+    /// True if multi-buffer is enabled and we have more frames for
+    /// this packet.
+    #[inline]
+    pub fn has_more_frames(&self) -> bool {
+        (self.options & XDP_PKT_CONTD) == 1
     }
 
     #[inline]
@@ -393,7 +404,7 @@ mod tests {
 
     use libxdp_sys::xdp_desc;
 
-    use crate::umem::{FrameDesc, FrameLayout, UmemRegion};
+    use crate::umem::{FrameDesc, FrameLayout, UmemRegion, frame::XDP_PKT_CONTD};
 
     #[test]
     fn writes_persist() {
@@ -471,6 +482,32 @@ mod tests {
             },
             b"world!"
         );
+    }
+
+    #[test]
+    fn has_more_frames_returns_false_when_contd_flag_not_set() {
+        let mut desc = FrameDesc::new(0);
+        desc.set_options(0);
+        assert_eq!(desc.has_more_frames(), false);
+    }
+
+    #[test]
+    fn has_more_frames_returns_true_when_contd_flag_set() {
+        let mut desc = FrameDesc::new(0);
+        desc.set_options(XDP_PKT_CONTD);
+        assert_eq!(desc.has_more_frames(), true);
+    }
+
+    #[test]
+    fn has_more_frames_with_other_flags_set() {
+        let mut desc = FrameDesc::new(0);
+        // Set multiple flags including XDP_PKT_CONTD
+        desc.set_options(XDP_PKT_CONTD | 0x02 | 0x04);
+        assert_eq!(desc.has_more_frames(), true);
+
+        // Set other flags but not XDP_PKT_CONTD
+        desc.set_options(0x02 | 0x04 | 0x08);
+        assert_eq!(desc.has_more_frames(), false);
     }
 
     #[test]
