@@ -59,6 +59,11 @@ bitflags! {
         /// in the
         /// [docs](https://www.kernel.org/doc/html/latest/networking/af_xdp.html#xdp-use-need-wakeup-bind-flag).
         const XDP_USE_NEED_WAKEUP = 8;
+
+        /// If set, signal to the kernel that we want multi-buffer support. Note that this also
+        /// requires an XDP program that supports multi-buffer, with `xdp.frags` as the section name,
+        /// so you almost certainly want to set XSK_LIBXDP_FLAGS_INHIBIT_PROG_LOAD.
+        const XDP_USE_SG = 16;
     }
 }
 
