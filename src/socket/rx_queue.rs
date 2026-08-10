@@ -63,7 +63,7 @@ impl RxQueue {
                     desc.options = (*recv_pkt_desc).options;
                 }
 
-                idx += 1;
+                idx = idx.wrapping_add(1);
             }
 
             unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_mut(), cnt) };

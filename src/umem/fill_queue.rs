@@ -65,7 +65,7 @@ impl FillQueue {
                         desc.addr as u64
                 };
 
-                idx += 1;
+                idx = idx.wrapping_add(1);
             }
 
             unsafe { libxdp_sys::xsk_ring_prod__submit(self.ring.as_mut(), cnt) };

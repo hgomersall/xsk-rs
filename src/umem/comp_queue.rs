@@ -62,7 +62,7 @@ impl CompQueue {
                 desc.lengths.headroom = 0;
                 desc.options = 0;
 
-                idx += 1;
+                idx = idx.wrapping_add(1);
             }
 
             unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_mut(), cnt) };
