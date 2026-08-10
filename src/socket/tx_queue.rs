@@ -65,7 +65,7 @@ impl TxQueue {
                 // this queue.
                 unsafe { desc.write_xdp_desc(&mut *send_pkt_desc) };
 
-                idx += 1;
+                idx = idx.wrapping_add(1);
             }
 
             unsafe { libxdp_sys::xsk_ring_prod__submit(self.ring.as_mut(), cnt) };
