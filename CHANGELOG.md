@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## Fixed
+- keep the rx and tx rings alive and in place for as long as libxdp
+  needs them. libxdp retains the ring pointers it is passed and
+  dereferences them again during teardown to determine which memory to
+  unmap, so moving or freeing a ring beforehand caused `munmap` to be
+  called with a garbage address. The socket's memory was then never
+  released and subsequent binds to the same device and queue id failed
+  with `EBUSY`
+
 ## [0.8.0] - 2025-09-17
 
 ## Changed

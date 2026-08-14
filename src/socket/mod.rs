@@ -20,54 +20,66 @@ use std::{
 
 use crate::{
     config::{Interface, SocketConfig},
-    ring::{XskRingCons, XskRingProd},
+    ring::{XskRingCons, XskRingConsHandle, XskRingProd, XskRingProdHandle},
     umem::{CompQueue, FillQueue, Umem},
 };
 
-/// Wrapper around a pointer to some AF_XDP socket.
-#[derive(Debug)]
-struct XskSocket(NonNull<xsk_socket>);
-
-impl XskSocket {
-    /// # Safety
-    ///
-    /// Only one instance of this struct may exist since it deletes
-    /// the socket as part of its [`Drop`] impl. If there are copies or
-    /// clones of `ptr` then care must be taken to ensure they aren't
-    /// used once this struct goes out of scope, and that they don't
-    /// delete the socket themselves.
-    unsafe fn new(ptr: NonNull<xsk_socket>) -> Self {
-        Self(ptr)
-    }
-}
-
-impl Drop for XskSocket {
-    fn drop(&mut self) {
-        // SAFETY: unsafe constructor contract guarantees that the
-        // socket has not been deleted already.
-        unsafe {
-            libxdp_sys::xsk_socket__delete(self.0.as_mut());
-        }
-    }
-}
-
-unsafe impl Send for XskSocket {}
-
+/// An AF_XDP socket, along with everything libxdp dereferences when
+/// deleting it.
+///
+/// `xsk_socket__delete` reads back the rx and tx rings it was handed
+/// at creation to work out which memory to unmap, so they have to
+/// outlive it. Keeping them here rather than beside this struct is
+/// what guarantees they do: [`Drop::drop`] runs before any field is
+/// dropped, whatever order the fields are written in.
 #[derive(Debug)]
 struct SocketInner {
-    // `ptr` must appear before `umem` to ensure correct drop order.
-    _ptr: XskSocket,
+    ptr: NonNull<xsk_socket>,
+    _rx_ring: XskRingConsHandle,
+    _tx_ring: XskRingProdHandle,
     _umem: Umem,
 }
 
 impl SocketInner {
-    fn new(ptr: XskSocket, umem: Umem) -> Self {
+    /// # Safety
+    ///
+    /// Only one instance of this struct may exist for `ptr` since it
+    /// deletes the socket as part of its [`Drop`] impl. If there are
+    /// copies or clones of `ptr` then care must be taken to ensure
+    /// they aren't used once this struct goes out of scope, and that
+    /// they don't delete the socket themselves.
+    unsafe fn new(
+        ptr: NonNull<xsk_socket>,
+        rx_ring: XskRingConsHandle,
+        tx_ring: XskRingProdHandle,
+        umem: Umem,
+    ) -> Self {
         Self {
-            _ptr: ptr,
+            ptr,
+            _rx_ring: rx_ring,
+            _tx_ring: tx_ring,
             _umem: umem,
         }
     }
+
+    fn as_ptr(&self) -> *mut xsk_socket {
+        self.ptr.as_ptr()
+    }
 }
+
+impl Drop for SocketInner {
+    fn drop(&mut self) {
+        // SAFETY: unsafe constructor contract guarantees that the
+        // socket has not been deleted already, and every ring libxdp
+        // is about to dereference is a field of this struct, so none
+        // of them have been dropped yet.
+        unsafe {
+            libxdp_sys::xsk_socket__delete(self.as_ptr());
+        }
+    }
+}
+
+unsafe impl Send for SocketInner {}
 
 /// An AF_XDP socket.
 ///
@@ -122,8 +134,8 @@ impl Socket {
         queue_id: u32,
     ) -> Result<(TxQueue, RxQueue, Option<(FillQueue, CompQueue)>), SocketCreateError> {
         let mut socket_ptr = ptr::null_mut();
-        let mut tx_q = XskRingProd::default();
-        let mut rx_q = XskRingCons::default();
+        let tx_q = XskRingProd::default();
+        let rx_q = XskRingCons::default();
 
         let (err, fq, cq) = unsafe {
             umem.with_ptr_and_saved_queues(|xsk_umem, saved_fq_and_cq| {
@@ -136,8 +148,8 @@ impl Socket {
                     if_name.as_cstr().as_ptr(),
                     queue_id,
                     xsk_umem,
-                    rx_q.as_mut(),
-                    tx_q.as_mut(),
+                    rx_q.as_ptr(),
+                    tx_q.as_ptr(),
                     fq.as_mut().as_mut(), // double deref due to Box
                     cq.as_mut().as_mut(),
                     &config.into(),
@@ -154,12 +166,12 @@ impl Socket {
             });
         }
 
-        let socket_ptr = match NonNull::new(socket_ptr) {
+        let inner = match NonNull::new(socket_ptr) {
             Some(init_xsk) => {
-                // SAFETY: this is the only `XskSocket` instance for
+                // SAFETY: this is the only `SocketInner` instance for
                 // this pointer, and no other pointers to the socket
                 // exist.
-                unsafe { XskSocket::new(init_xsk) }
+                unsafe { SocketInner::new(init_xsk, rx_q.handle(), tx_q.handle(), umem.clone()) }
             }
             None => {
                 return Err(SocketCreateError {
@@ -169,7 +181,7 @@ impl Socket {
             }
         };
 
-        let fd = unsafe { libxdp_sys::xsk_socket__fd(socket_ptr.0.as_ref()) };
+        let fd = unsafe { libxdp_sys::xsk_socket__fd(inner.as_ptr()) };
 
         if fd < 0 {
             return Err(SocketCreateError {
@@ -180,7 +192,7 @@ impl Socket {
 
         let socket = Socket {
             fd: Fd::new(fd),
-            _inner: Arc::new(Mutex::new(SocketInner::new(socket_ptr, umem.clone()))),
+            _inner: Arc::new(Mutex::new(inner)),
         };
 
         let tx_q = if tx_q.is_ring_null() {
