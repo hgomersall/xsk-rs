@@ -49,12 +49,12 @@ impl RxQueue {
 
         let mut idx = 0;
 
-        let cnt = unsafe { libxdp_sys::xsk_ring_cons__peek(self.ring.as_mut(), nb, &mut idx) };
+        let cnt = unsafe { libxdp_sys::xsk_ring_cons__peek(self.ring.as_ptr(), nb, &mut idx) };
 
         if cnt > 0 {
             for desc in descs.iter_mut().take(cnt as usize) {
                 let recv_pkt_desc =
-                    unsafe { libxdp_sys::xsk_ring_cons__rx_desc(self.ring.as_ref(), idx) };
+                    unsafe { libxdp_sys::xsk_ring_cons__rx_desc(self.ring.as_ptr(), idx) };
 
                 unsafe {
                     desc.addr = (*recv_pkt_desc).addr as usize;
@@ -66,7 +66,7 @@ impl RxQueue {
                 idx = idx.wrapping_add(1);
             }
 
-            unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_mut(), cnt) };
+            unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_ptr(), cnt) };
         }
 
         cnt as usize
@@ -83,11 +83,11 @@ impl RxQueue {
     pub unsafe fn consume_one(&mut self, desc: &mut FrameDesc) -> usize {
         let mut idx = 0;
 
-        let cnt = unsafe { libxdp_sys::xsk_ring_cons__peek(self.ring.as_mut(), 1, &mut idx) };
+        let cnt = unsafe { libxdp_sys::xsk_ring_cons__peek(self.ring.as_ptr(), 1, &mut idx) };
 
         if cnt > 0 {
             let recv_pkt_desc =
-                unsafe { libxdp_sys::xsk_ring_cons__rx_desc(self.ring.as_ref(), idx) };
+                unsafe { libxdp_sys::xsk_ring_cons__rx_desc(self.ring.as_ptr(), idx) };
 
             unsafe {
                 desc.addr = (*recv_pkt_desc).addr as usize;
@@ -96,7 +96,7 @@ impl RxQueue {
                 desc.options = (*recv_pkt_desc).options;
             }
 
-            unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_mut(), cnt) };
+            unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_ptr(), cnt) };
         }
 
         cnt as usize

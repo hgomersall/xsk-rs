@@ -18,21 +18,22 @@ use libxdp_sys::{xsk_ring_cons, xsk_ring_prod};
 
 /// A consumer ring.
 ///
-/// # Invariant
+/// The ring is reachable only as a raw pointer, through [`as_ptr`]:
+/// libxdp's ring functions take pointers and nothing else reads or
+/// writes one, so no reference to a ring is ever created and the
+/// pointer libxdp holds for the life of the socket or UMEM is never
+/// invalidated. The [`UnsafeCell`] is what makes writing through a
+/// pointer derived from a shared borrow sound.
 ///
-/// On the Rust side a ring is only ever accessed through the single
-/// `XskRingCons` that wraps it. This type is deliberately not
-/// [`Clone`] and the handles returned by [`handle`] grant no access
-/// to the ring, so handing out references to it here is sound.
+/// What the wrapper provides is exclusion. It is deliberately not
+/// [`Clone`] and the handles returned by [`handle`] grant no access,
+/// so it is the only way to reach the ring, and since [`as_ptr`]
+/// takes `&self` whatever holds a wrapper has to go on taking `&mut
+/// self` for calls that write to the ring.
 ///
-/// libxdp holds the pointer too and dereferences it when setting up
-/// and tearing down the socket or UMEM it was passed to, but never
-/// while the wrapper is in use: the wrapper is not handed out until
-/// setup has returned, and everything that can still reach a ring
-/// keeps whatever tears it down alive - the queues hold a socket, and
-/// the UMEM's own saved rings are dropped after `xsk_umem__delete`.
-///
+/// [`as_ptr`]: Self::as_ptr
 /// [`handle`]: Self::handle
+/// [`UnsafeCell`]: std::cell::UnsafeCell
 pub(crate) struct XskRingCons(Arc<UnsafeCell<xsk_ring_cons>>);
 
 impl XskRingCons {
@@ -47,25 +48,17 @@ impl XskRingCons {
     }
 
     /// A pointer to the ring, for handing to libxdp.
+    ///
+    /// Writeable, so see this type's docs on which borrow to take.
     pub(crate) fn as_ptr(&self) -> *mut xsk_ring_cons {
         self.0.get()
     }
 
-    pub(crate) fn as_mut(&mut self) -> &mut xsk_ring_cons {
-        // SAFETY: see the invariant on this type. The `&mut self`
-        // borrow rules out any other reference derived from this
-        // wrapper, and libxdp is not touching the ring for as long as
-        // the wrapper exists.
-        unsafe { &mut *self.0.get() }
-    }
-
-    pub(crate) fn as_ref(&self) -> &xsk_ring_cons {
-        // SAFETY: see the invariant on this type.
-        unsafe { &*self.0.get() }
-    }
-
     pub(crate) fn is_ring_null(&self) -> bool {
-        self.as_ref().ring.is_null()
+        // SAFETY: the ring is initialised and libxdp is not touching
+        // it. Read through the pointer rather than through a
+        // reference, so that no borrow of the ring is created.
+        unsafe { (*self.0.get()).ring.is_null() }
     }
 }
 
@@ -92,13 +85,28 @@ impl Default for XskRingCons {
 
 impl fmt::Debug for XskRingCons {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("XskRingCons").field(self.as_ref()).finish()
+        // SAFETY: see `is_ring_null`. Copied out so that what gets
+        // borrowed for formatting is the copy and not the ring.
+        let ring = unsafe { *self.0.get() };
+
+        f.debug_tuple("XskRingCons").field(&ring).finish()
     }
 }
 
-// SAFETY: the ring is only accessed through this wrapper, which
-// cannot be duplicated, so it is never accessed from two threads at
-// once, and libxdp only accesses it on setup and teardown.
+// SAFETY: the ring is only reached through this wrapper, which cannot
+// be duplicated, so it is never reached from two threads at once.
+// libxdp reaches it on setup and teardown, and a teardown can happen
+// on a different thread from the last use, but never concurrently
+// with one: a teardown runs on the thread holding the last handle to
+// whatever libxdp stored the ring on, and by then the wrapper is
+// either gone or reachable only from that same thread.
+//
+// The ring also outlives every such teardown, since everything libxdp
+// stored it on holds a handle, or the wrapper itself, for its life.
+//
+// Ordering between two such teardowns runs through libxdp's own
+// unsynchronised refcounts, which is why a socket is deleted under
+// the same UMEM lock its creation takes.
 unsafe impl Send for XskRingCons {}
 
 /// Keeps an [`XskRingCons`]'s memory alive without granting any
@@ -107,8 +115,9 @@ pub(crate) struct XskRingConsHandle(Arc<UnsafeCell<xsk_ring_cons>>);
 
 impl fmt::Debug for XskRingConsHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The address, not the contents: dereferencing here would
-        // alias the `&mut` the wrapper hands out.
+        // The address, not the contents. A handle is access-free, and
+        // reading the ring through one would be reaching around the
+        // wrapper that serialises access to it.
         f.debug_tuple("XskRingConsHandle")
             .field(&self.0.get())
             .finish()
@@ -119,8 +128,6 @@ impl fmt::Debug for XskRingConsHandle {
 unsafe impl Send for XskRingConsHandle {}
 
 /// A producer ring.
-///
-/// # Invariant
 ///
 /// See [`XskRingCons`].
 pub(crate) struct XskRingProd(Arc<UnsafeCell<xsk_ring_prod>>);
@@ -135,25 +142,15 @@ impl XskRingProd {
     }
 
     /// A pointer to the ring, for handing to libxdp.
+    ///
+    /// See [`XskRingCons::as_ptr`].
     pub(crate) fn as_ptr(&self) -> *mut xsk_ring_prod {
         self.0.get()
     }
 
-    pub(crate) fn as_mut(&mut self) -> &mut xsk_ring_prod {
-        // SAFETY: see the invariant on `XskRingCons`. The `&mut self`
-        // borrow rules out any other reference derived from this
-        // wrapper, and libxdp is not touching the ring for as long as
-        // the wrapper exists.
-        unsafe { &mut *self.0.get() }
-    }
-
-    pub(crate) fn as_ref(&self) -> &xsk_ring_prod {
-        // SAFETY: see the invariant on `XskRingCons`.
-        unsafe { &*self.0.get() }
-    }
-
     pub(crate) fn is_ring_null(&self) -> bool {
-        self.as_ref().ring.is_null()
+        // SAFETY: see `XskRingCons::is_ring_null`.
+        unsafe { (*self.0.get()).ring.is_null() }
     }
 }
 
@@ -176,7 +173,10 @@ impl Default for XskRingProd {
 
 impl fmt::Debug for XskRingProd {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("XskRingProd").field(self.as_ref()).finish()
+        // See the impl for `XskRingCons`.
+        let ring = unsafe { *self.0.get() };
+
+        f.debug_tuple("XskRingProd").field(&ring).finish()
     }
 }
 

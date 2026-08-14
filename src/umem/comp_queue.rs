@@ -61,12 +61,12 @@ impl CompQueue {
 
         let mut idx = 0;
 
-        let cnt = unsafe { libxdp_sys::xsk_ring_cons__peek(self.ring.as_mut(), nb, &mut idx) };
+        let cnt = unsafe { libxdp_sys::xsk_ring_cons__peek(self.ring.as_ptr(), nb, &mut idx) };
 
         if cnt > 0 {
             for desc in descs.iter_mut().take(cnt as usize) {
                 let addr =
-                    unsafe { *libxdp_sys::xsk_ring_cons__comp_addr(self.ring.as_ref(), idx) };
+                    unsafe { *libxdp_sys::xsk_ring_cons__comp_addr(self.ring.as_ptr(), idx) };
 
                 desc.addr = addr as usize;
                 desc.lengths.data = 0;
@@ -76,7 +76,7 @@ impl CompQueue {
                 idx = idx.wrapping_add(1);
             }
 
-            unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_mut(), cnt) };
+            unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_ptr(), cnt) };
         }
 
         cnt as usize
@@ -93,17 +93,17 @@ impl CompQueue {
     pub unsafe fn consume_one(&mut self, desc: &mut FrameDesc) -> usize {
         let mut idx = 0;
 
-        let cnt = unsafe { libxdp_sys::xsk_ring_cons__peek(self.ring.as_mut(), 1, &mut idx) };
+        let cnt = unsafe { libxdp_sys::xsk_ring_cons__peek(self.ring.as_ptr(), 1, &mut idx) };
 
         if cnt > 0 {
-            let addr = unsafe { *libxdp_sys::xsk_ring_cons__comp_addr(self.ring.as_ref(), idx) };
+            let addr = unsafe { *libxdp_sys::xsk_ring_cons__comp_addr(self.ring.as_ptr(), idx) };
 
             desc.addr = addr as usize;
             desc.lengths.data = 0;
             desc.lengths.headroom = 0;
             desc.options = 0;
 
-            unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_mut(), cnt) };
+            unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_ptr(), cnt) };
         }
 
         cnt as usize

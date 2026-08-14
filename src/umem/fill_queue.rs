@@ -70,19 +70,19 @@ impl FillQueue {
 
         let mut idx = 0;
 
-        let cnt = unsafe { libxdp_sys::xsk_ring_prod__reserve(self.ring.as_mut(), nb, &mut idx) };
+        let cnt = unsafe { libxdp_sys::xsk_ring_prod__reserve(self.ring.as_ptr(), nb, &mut idx) };
 
         if cnt > 0 {
             for desc in descs.iter().take(cnt as usize) {
                 unsafe {
-                    *libxdp_sys::xsk_ring_prod__fill_addr(self.ring.as_mut(), idx) =
+                    *libxdp_sys::xsk_ring_prod__fill_addr(self.ring.as_ptr(), idx) =
                         desc.addr as u64
                 };
 
                 idx = idx.wrapping_add(1);
             }
 
-            unsafe { libxdp_sys::xsk_ring_prod__submit(self.ring.as_mut(), cnt) };
+            unsafe { libxdp_sys::xsk_ring_prod__submit(self.ring.as_ptr(), cnt) };
         }
 
         cnt as usize
@@ -99,14 +99,14 @@ impl FillQueue {
     pub unsafe fn produce_one(&mut self, desc: &FrameDesc) -> usize {
         let mut idx = 0;
 
-        let cnt = unsafe { libxdp_sys::xsk_ring_prod__reserve(self.ring.as_mut(), 1, &mut idx) };
+        let cnt = unsafe { libxdp_sys::xsk_ring_prod__reserve(self.ring.as_ptr(), 1, &mut idx) };
 
         if cnt > 0 {
             unsafe {
-                *libxdp_sys::xsk_ring_prod__fill_addr(self.ring.as_mut(), idx) = desc.addr as u64
+                *libxdp_sys::xsk_ring_prod__fill_addr(self.ring.as_ptr(), idx) = desc.addr as u64
             };
 
-            unsafe { libxdp_sys::xsk_ring_prod__submit(self.ring.as_mut(), cnt) };
+            unsafe { libxdp_sys::xsk_ring_prod__submit(self.ring.as_ptr(), cnt) };
         }
 
         cnt as usize
@@ -190,6 +190,6 @@ impl FillQueue {
     /// [`wakeup`]: Self::wakeup
     #[inline]
     pub fn needs_wakeup(&self) -> bool {
-        unsafe { libxdp_sys::xsk_ring_prod__needs_wakeup(self.ring.as_ref()) != 0 }
+        unsafe { libxdp_sys::xsk_ring_prod__needs_wakeup(self.ring.as_ptr()) != 0 }
     }
 }
