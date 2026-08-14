@@ -28,8 +28,9 @@ use libxdp_sys::{xsk_ring_cons, xsk_ring_prod};
 /// libxdp holds the pointer too and dereferences it when setting up
 /// and tearing down the socket or UMEM it was passed to, but never
 /// while the wrapper is in use: the wrapper is not handed out until
-/// setup has returned, and the rx and tx queues that hold one keep
-/// their socket alive.
+/// setup has returned, and everything that can still reach a ring
+/// keeps whatever tears it down alive - the queues hold a socket, and
+/// the UMEM's own saved rings are dropped after `xsk_umem__delete`.
 ///
 /// [`handle`]: Self::handle
 pub(crate) struct XskRingCons(Arc<UnsafeCell<xsk_ring_cons>>);

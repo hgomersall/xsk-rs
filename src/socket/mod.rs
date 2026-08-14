@@ -20,7 +20,7 @@ use std::{
 use crate::{
     config::{Interface, SocketConfig},
     ring::{XskRingCons, XskRingConsHandle, XskRingProd, XskRingProdHandle},
-    umem::{CompQueue, FillQueue, Umem},
+    umem::{CompQueue, CtxRings, FillQueue, Umem},
 };
 
 /// An AF_XDP socket, along with everything libxdp dereferences when
@@ -28,15 +28,17 @@ use crate::{
 ///
 /// `xsk_socket__delete` reads back the rx and tx rings it was handed
 /// at creation to work out which memory to unmap, so they have to
-/// outlive it. Keeping them here rather than beside this struct is
-/// what guarantees they do: [`Drop::drop`] runs before any field is
-/// dropped, whatever order the fields are written in.
+/// outlive it - as do the UMEM's fill and comp rings, which the
+/// `umem` handle keeps alive. Keeping all of them here rather than
+/// beside this struct is what guarantees they do: [`Drop::drop`] runs
+/// before any field is dropped, whatever order the fields are written
+/// in.
 #[derive(Debug)]
 struct SocketInner {
     ptr: NonNull<xsk_socket>,
     _rx_ring: XskRingConsHandle,
     _tx_ring: XskRingProdHandle,
-    _umem: Umem,
+    umem: Umem,
 }
 
 impl SocketInner {
@@ -47,6 +49,9 @@ impl SocketInner {
     /// copies or clones of `ptr` then care must be taken to ensure
     /// they aren't used once this struct goes out of scope, and that
     /// they don't delete the socket themselves.
+    ///
+    /// `umem` must be the UMEM `ptr` was created from, since that is
+    /// what the deletion is serialised on.
     unsafe fn new(
         ptr: NonNull<xsk_socket>,
         rx_ring: XskRingConsHandle,
@@ -57,7 +62,7 @@ impl SocketInner {
             ptr,
             _rx_ring: rx_ring,
             _tx_ring: tx_ring,
-            _umem: umem,
+            umem,
         }
     }
 
@@ -69,12 +74,11 @@ impl SocketInner {
 impl Drop for SocketInner {
     fn drop(&mut self) {
         // SAFETY: unsafe constructor contract guarantees that the
-        // socket has not been deleted already, and every ring libxdp
-        // is about to dereference is a field of this struct, so none
-        // of them have been dropped yet.
-        unsafe {
-            libxdp_sys::xsk_socket__delete(self.as_ptr());
-        }
+        // socket has not been deleted already and that it was created
+        // from this UMEM, and every ring libxdp is about to
+        // dereference is a field of this struct, so none of them have
+        // been dropped yet.
+        unsafe { self.umem.delete_socket(self.as_ptr()) };
     }
 }
 
@@ -115,6 +119,22 @@ impl Socket {
     /// For further details on using a shared [`Umem`] please see the
     /// [docs](https://www.kernel.org/doc/html/latest/networking/af_xdp.html#xdp-shared-umem-bind-flag).
     ///
+    /// Every queue returned here holds a handle to the socket, which
+    /// is deleted once the last of them is dropped. That includes the
+    /// [`FillQueue`] and [`CompQueue`], as libxdp unmaps their rings
+    /// when the last socket created from this [`Umem`] and bound to
+    /// this `(if_name, queue_id)` pair goes away, so dropping just the
+    /// [`TxQueue`] and [`RxQueue`] will not release the device.
+    ///
+    /// Where that pair is bound to more than once from this [`Umem`],
+    /// the [`FillQueue`] and [`CompQueue`] belong to the socket that
+    /// was handed them, and the device is released only once every
+    /// socket on the pair has gone, that one included.
+    ///
+    /// Deleting the socket takes the same [`Umem`] lock that creating
+    /// one does, so dropping the last of its queues can block while
+    /// another thread creates or drops a socket on that [`Umem`].
+    ///
     /// # Safety
     ///
     /// If sharing the [`Umem`] and the `(if_name, queue_id)` pair is
@@ -136,34 +156,24 @@ impl Socket {
         let tx_q = XskRingProd::default();
         let rx_q = XskRingCons::default();
 
-        let (err, fq, cq) = unsafe {
-            umem.with_ptr_and_saved_queues(|xsk_umem, saved_fq_and_cq| {
-                let (mut fq, mut cq) = saved_fq_and_cq
-                    .take()
-                    .unwrap_or_else(|| (Box::default(), Box::default()));
-
-                let err = libxdp_sys::xsk_socket__create_shared(
+        let rings = umem
+            .with_ptr_and_fq_and_cq(|xsk_umem, fq, cq| unsafe {
+                libxdp_sys::xsk_socket__create_shared(
                     &mut socket_ptr,
                     if_name.as_cstr().as_ptr(),
                     queue_id,
                     xsk_umem,
                     rx_q.as_ptr(),
                     tx_q.as_ptr(),
-                    fq.as_mut().as_mut(), // double deref due to Box
-                    cq.as_mut().as_mut(),
+                    fq.as_ptr(),
+                    cq.as_ptr(),
                     &config.into(),
-                );
-
-                (err, fq, cq)
+                )
             })
-        };
-
-        if err != 0 {
-            return Err(SocketCreateError {
+            .map_err(|err| SocketCreateError {
                 reason: "non-zero error code returned when creating AF_XDP socket",
                 err: Some(io::Error::from_raw_os_error(-err)),
-            });
-        }
+            })?;
 
         let inner = match NonNull::new(socket_ptr) {
             Some(init_xsk) => {
@@ -209,18 +219,18 @@ impl Socket {
                 err: None,
             });
         } else {
-            RxQueue::new(rx_q, socket)
+            RxQueue::new(rx_q, socket.clone())
         };
 
-        let fq_and_cq = match (fq.is_ring_null(), cq.is_ring_null()) {
-            (true, true) => None,
-            (false, false) => {
-                let fq = FillQueue::new(*fq, umem.clone());
-                let cq = CompQueue::new(*cq, umem.clone());
+        let fq_and_cq = match rings {
+            CtxRings::New(fq, cq) => {
+                let fq = FillQueue::new(fq, socket.clone());
+                let cq = CompQueue::new(cq, socket);
 
                 Some((fq, cq))
             }
-            _ => {
+            CtxRings::Existing => None,
+            CtxRings::Mismatched => {
                 return Err(SocketCreateError {
                     reason: "fill queue xor comp queue ring is null, either both or neither should be non-null",
                     err: None,
