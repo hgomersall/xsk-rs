@@ -34,10 +34,14 @@ they require a veth pair to be set up. However to avoid running cargo
 under `root` it's best to first build the tests/examples and run the 
 binaries directly.
 
+`run_all_tests.sh` does that for the tests, so run it *without*
+`sudo`: it builds as the invoking user and elevates only the test
+binaries. Any arguments are forwarded to each of them, so a test
+filter or `--nocapture` can be passed through.
+
 ```
 # tests
-cargo build --tests
-sudo run_all_tests.sh
+./run_all_tests.sh
 
 # examples
 cargo build --examples --release

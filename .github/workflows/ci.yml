@@ -31,8 +31,7 @@ jobs:
           sudo apt update
           sudo apt install clang llvm gcc-multilib libelf-dev libpcap-dev build-essential
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --tests
-      - run: sudo ./run_all_tests.sh
+      - run: ./run_all_tests.sh
 
   miri:
     name: Miri
