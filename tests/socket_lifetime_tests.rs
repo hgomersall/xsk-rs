@@ -11,6 +11,10 @@
 //! Since it is the *teardown* that is broken, a test only notices if
 //! it binds to the same device and queue id a second time, which is
 //! what these tests do, in a variety of drop orders.
+//!
+//! The other half of the story is that a ring must not be unmapped
+//! while a queue can still reach it, which is why the fill and comp
+//! queues keep their socket alive rather than just the UMEM.
 
 #[allow(dead_code)]
 mod setup;
@@ -26,7 +30,7 @@ use serial_test::serial;
 use setup::{VethDevConfig, veth_setup};
 use xsk_rs::{
     CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem,
-    config::{Interface, SocketConfig, UmemConfig},
+    config::{Interface, LibxdpFlags, SocketConfig, UmemConfig},
     socket::SocketCreateError,
 };
 
@@ -108,6 +112,70 @@ async fn device_can_be_bound_again_when_tx_queue_dropped_before_rx_queue() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn device_can_be_bound_again_when_fill_and_comp_queues_dropped_before_socket() {
+    run_with_dev(|if_name| {
+        let (umem, _descs) = build_umem();
+
+        let (tx_q, rx_q, fq_and_cq) = bind_socket(&umem, &if_name).expect("failed to bind socket");
+
+        // libxdp unmaps the fill and comp rings when the last socket
+        // using them is deleted, so they have to survive being
+        // dropped here.
+        drop(fq_and_cq);
+        drop(tx_q);
+        drop(rx_q);
+        drop(umem);
+
+        assert_can_bind(&if_name);
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn fill_and_comp_queues_outliving_their_socket_are_still_usable() {
+    run_with_dev(|if_name| {
+        let (umem, descs) = build_umem();
+
+        let (tx_q, rx_q, fq_and_cq) = bind_socket(&umem, &if_name).expect("failed to bind socket");
+
+        let (mut fq, mut cq) = fq_and_cq.expect("expected a fill and comp queue");
+
+        // libxdp unmaps a context's fill and comp rings when the last
+        // socket using that context is deleted, so the two queues
+        // have to keep their socket alive. Were it deleted here, the
+        // rings used below would have been unmapped along with it.
+        drop(tx_q);
+        drop(rx_q);
+
+        assert_cannot_bind(&if_name);
+
+        // SAFETY: the descriptors belong to `umem`, and none of them
+        // are in the kernel's hands, this being a fresh socket.
+        let produced = unsafe { fq.produce(&descs) };
+
+        assert_eq!(produced, descs.len());
+
+        let mut completed = descs.clone();
+
+        // SAFETY: see above. Nothing has been transmitted, so this
+        // only reads the ring, but read or write it faults just the
+        // same if the ring is gone.
+        let consumed = unsafe { cq.consume(&mut completed) };
+
+        assert_eq!(consumed, 0);
+
+        drop(fq);
+        drop(cq);
+        drop(umem);
+
+        assert_can_bind(&if_name);
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn device_can_be_bound_repeatedly() {
     run_with_dev(|if_name| {
         for i in 0..5 {
@@ -117,6 +185,63 @@ async fn device_can_be_bound_repeatedly() {
 
             drop(socket);
         }
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn devices_can_be_bound_again_after_sockets_sharing_a_umem_dropped() {
+    run_with_dev_pair(|if_name1, if_name2| {
+        let (umem, _descs) = build_umem();
+
+        let socket1 = bind_socket(&umem, &if_name1).expect("failed to bind first socket");
+        let socket2 = bind_socket(&umem, &if_name2).expect("failed to bind second socket");
+
+        // The two devices get a context each, so each socket has fill
+        // and comp rings of its own: the first socket is handed the
+        // pair saved when the UMEM was created, the second a freshly
+        // allocated pair. Both have to survive until their socket is
+        // deleted.
+        drop(socket1);
+        drop(socket2);
+        drop(umem);
+
+        assert_can_bind(&if_name1);
+        assert_can_bind(&if_name2);
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn device_can_be_bound_again_after_sockets_sharing_a_context_dropped() {
+    run_with_dev(|if_name| {
+        let (umem, _descs) = build_umem();
+
+        // Both sockets bind to the same device and queue id, so
+        // libxdp puts them on a single context. Only the first is
+        // handed the fill and comp rings; the second shares them and
+        // gets nothing back.
+        let (tx_q1, rx_q1, fq_and_cq) =
+            bind_shared_socket(&umem, &if_name).expect("failed to bind first socket");
+
+        assert!(fq_and_cq.is_some());
+
+        let (tx_q2, rx_q2, no_fq_and_cq) =
+            bind_shared_socket(&umem, &if_name).expect("failed to bind second socket");
+
+        assert!(no_fq_and_cq.is_none());
+
+        // Drop the socket that owns the rings first. It is the second
+        // socket's teardown that drops the context's refcount to zero
+        // and unmaps them, so they have to outlive a socket that
+        // never saw them.
+        drop((tx_q1, rx_q1, fq_and_cq));
+        drop((tx_q2, rx_q2));
+        drop(umem);
+
+        assert_can_bind(&if_name);
     })
     .await
 }
@@ -186,6 +311,19 @@ fn bind_socket(umem: &Umem, if_name: &Interface) -> Result<SocketParts, SocketCr
     unsafe { Socket::new(SocketConfig::default(), umem, if_name, QUEUE_ID) }
 }
 
+/// Binds a socket that may share its device and queue id with one
+/// bound earlier.
+fn bind_shared_socket(umem: &Umem, if_name: &Interface) -> Result<SocketParts, SocketCreateError> {
+    let config = SocketConfig::builder()
+        .libxdp_flags(LibxdpFlags::XSK_LIBXDP_FLAGS_INHIBIT_PROG_LOAD)
+        .build();
+
+    // SAFETY: `XSK_LIBXDP_FLAGS_INHIBIT_PROG_LOAD` is set, so no
+    // double-free can occur when these sockets are dropped, whatever
+    // is already bound to this device and queue id pair.
+    unsafe { Socket::new(config, umem, if_name, QUEUE_ID) }
+}
+
 /// Binds a fresh socket, on a fresh UMEM, to `if_name`, retrying for
 /// up to [`BIND_TIMEOUT`] for as long as the device and queue id are
 /// still busy.
@@ -219,6 +357,40 @@ fn assert_can_bind(if_name: &Interface) {
             BIND_TIMEOUT,
             describe(&e),
         );
+    }
+}
+
+/// Asserts that a fresh socket cannot be bound to `if_name`, the
+/// kernel rejecting the bind with `EBUSY` for as long as the socket
+/// already bound there is alive.
+///
+/// Unlike [`assert_can_bind`] this gets a single attempt: the socket
+/// it is asserting against is deliberately still alive, so there is
+/// nothing to wait for.
+///
+/// The probe inhibits the loading of an XDP program so that a bind it
+/// is not expected to win leaves the program attached for `if_name`
+/// well alone.
+///
+/// The error is required to be `EBUSY` so that a bind which failed
+/// for an unrelated reason cannot pass the assertion.
+fn assert_cannot_bind(if_name: &Interface) {
+    let (umem, _descs) = build_umem();
+
+    match bind_shared_socket(&umem, if_name) {
+        Ok(_) => panic!(
+            "bound a second socket to device {:?} queue {}, so the first was deleted \
+             while its fill and comp queues were still alive",
+            if_name, QUEUE_ID,
+        ),
+        Err(e) if !is_busy(&e) => panic!(
+            "binding to device {:?} queue {} failed for a reason other than the device \
+             being in use: {}",
+            if_name,
+            QUEUE_ID,
+            describe(&e),
+        ),
+        Err(_) => (),
     }
 }
 
