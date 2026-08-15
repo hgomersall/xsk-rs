@@ -15,7 +15,6 @@ pub use comp_queue::CompQueue;
 use libxdp_sys::xsk_umem;
 use log::error;
 use std::{
-    borrow::Borrow,
     error::Error,
     fmt, io,
     num::NonZeroU32,
@@ -120,7 +119,7 @@ impl Umem {
         let mem = UmemRegion::new(frame_count, frame_layout, use_huge_pages).map_err(|e| {
             UmemCreateError {
                 reason: "failed to create mmap'd UMEM region",
-                err: e,
+                err: Some(e),
             }
         })?;
 
@@ -142,7 +141,7 @@ impl Umem {
         if err != 0 {
             return Err(UmemCreateError {
                 reason: "non-zero error code returned when creating UMEM",
-                err: io::Error::from_raw_os_error(-err),
+                err: Some(io::Error::from_raw_os_error(-err)),
             });
         }
 
@@ -156,7 +155,7 @@ impl Umem {
             None => {
                 return Err(UmemCreateError {
                     reason: "UMEM is null",
-                    err: io::Error::from_raw_os_error(-err),
+                    err: None,
                 });
             }
         };
@@ -164,14 +163,14 @@ impl Umem {
         if fq.is_ring_null() {
             return Err(UmemCreateError {
                 reason: "fill queue ring is null",
-                err: io::Error::from_raw_os_error(-err),
+                err: None,
             });
         };
 
         if cq.is_ring_null() {
             return Err(UmemCreateError {
                 reason: "comp queue ring is null",
-                err: io::Error::from_raw_os_error(-err),
+                err: None,
             });
         }
 
@@ -330,7 +329,7 @@ impl Umem {
 #[derive(Debug)]
 pub struct UmemCreateError {
     reason: &'static str,
-    err: io::Error,
+    err: Option<io::Error>,
 }
 
 impl fmt::Display for UmemCreateError {
@@ -341,7 +340,7 @@ impl fmt::Display for UmemCreateError {
 
 impl Error for UmemCreateError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.err.borrow())
+        self.err.as_ref().map(|err| err as _)
     }
 }
 

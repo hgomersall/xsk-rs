@@ -10,6 +10,9 @@
   called with a garbage address. The socket's memory was then never
   released and subsequent binds to the same device and queue id failed
   with `EBUSY`
+- `SocketCreateError` and `UmemCreateError` no longer answer `source()`
+  with an `io::Error` reading `Success (os error 0)` on the paths that
+  have no OS error behind them. They report `None` there instead
 
 ## [0.8.0] - 2025-09-17
 

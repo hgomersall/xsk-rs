@@ -11,7 +11,6 @@ pub use tx_queue::TxQueue;
 
 use libxdp_sys::xsk_socket;
 use std::{
-    borrow::Borrow,
     error::Error,
     fmt, io,
     ptr::{self, NonNull},
@@ -162,7 +161,7 @@ impl Socket {
         if err != 0 {
             return Err(SocketCreateError {
                 reason: "non-zero error code returned when creating AF_XDP socket",
-                err: io::Error::from_raw_os_error(-err),
+                err: Some(io::Error::from_raw_os_error(-err)),
             });
         }
 
@@ -176,7 +175,7 @@ impl Socket {
             None => {
                 return Err(SocketCreateError {
                     reason: "returned socket pointer was null",
-                    err: io::Error::from_raw_os_error(-err),
+                    err: None,
                 });
             }
         };
@@ -186,7 +185,7 @@ impl Socket {
         if fd < 0 {
             return Err(SocketCreateError {
                 reason: "failed to retrieve AF_XDP socket file descriptor",
-                err: io::Error::from_raw_os_error(-fd),
+                err: None,
             });
         }
 
@@ -198,7 +197,7 @@ impl Socket {
         let tx_q = if tx_q.is_ring_null() {
             return Err(SocketCreateError {
                 reason: "returned tx queue ring is null",
-                err: io::Error::from_raw_os_error(-err),
+                err: None,
             });
         } else {
             TxQueue::new(tx_q, socket.clone())
@@ -207,7 +206,7 @@ impl Socket {
         let rx_q = if rx_q.is_ring_null() {
             return Err(SocketCreateError {
                 reason: "returned rx queue ring is null",
-                err: io::Error::from_raw_os_error(-err),
+                err: None,
             });
         } else {
             RxQueue::new(rx_q, socket)
@@ -224,7 +223,7 @@ impl Socket {
             _ => {
                 return Err(SocketCreateError {
                     reason: "fill queue xor comp queue ring is null, either both or neither should be non-null",
-                    err: io::Error::from_raw_os_error(-err),
+                    err: None,
                 });
             }
         };
@@ -246,7 +245,7 @@ impl Clone for Socket {
 #[derive(Debug)]
 pub struct SocketCreateError {
     reason: &'static str,
-    err: io::Error,
+    err: Option<io::Error>,
 }
 
 impl fmt::Display for SocketCreateError {
@@ -257,6 +256,6 @@ impl fmt::Display for SocketCreateError {
 
 impl Error for SocketCreateError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.err.borrow())
+        self.err.as_ref().map(|err| err as _)
     }
 }
