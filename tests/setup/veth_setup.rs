@@ -162,6 +162,33 @@ async fn get_link_index(handle: &Handle, name: &str) -> anyhow::Result<u32> {
         .index)
 }
 
+/// Deletes the link named `name`, if there is one.
+///
+/// Best effort: any failure is ignored, since the only thing that
+/// depends on the outcome is the `add` that follows, which reports a
+/// link it could not remove clearly enough by itself.
+///
+/// A [`VethPair`] deletes its devices when dropped, but nothing runs
+/// that drop if the test process dies outright rather than
+/// unwinding - an abort, a signal - and neither does it run if
+/// `build_veth_pair` itself fails after the pair has been added. The
+/// interface left behind then fails every later run with `EEXIST`
+/// until it is removed by hand. Clearing it on the way in rather than
+/// on the way out is what makes the suite recover on its own.
+async fn delete_link_if_exists(handle: &Handle, name: &str) {
+    let existing = handle
+        .link()
+        .get()
+        .match_name(name.into())
+        .execute()
+        .try_next()
+        .await;
+
+    if let Ok(Some(link)) = existing {
+        let _ = handle.link().del(link.header.index).execute().await;
+    }
+}
+
 pub async fn build_veth_pair(
     dev1_config: &VethDevConfig,
     dev2_config: &VethDevConfig,
@@ -169,6 +196,12 @@ pub async fn build_veth_pair(
     let (connection, handle, _) = rtnetlink::new_connection().unwrap();
 
     tokio::spawn(connection);
+
+    // Deleting either end of a veth pair takes both, but a previous
+    // run may have left only one of the two names in use, so try
+    // both.
+    delete_link_if_exists(&handle, &dev1_config.if_name).await;
+    delete_link_if_exists(&handle, &dev2_config.if_name).await;
 
     handle
         .link()

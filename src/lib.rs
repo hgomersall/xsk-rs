@@ -47,12 +47,15 @@
 //!
 //! // Bind an AF_XDP socket to the interface named `xsk_dev1`, on
 //! // queue 0.
-//! let (mut dev1_tx_q, _dev1_rx_q, _dev1_fq_and_cq) = Socket::new(
-//!     SocketConfig::default(),
-//!     &dev1_umem,
-//!     &"xsk_dev1".parse().unwrap(),
-//!     0,
-//! )
+//! // SAFETY: no socket is bound to this device and queue id pair.
+//! let (mut dev1_tx_q, _dev1_rx_q, _dev1_fq_and_cq) = unsafe {
+//!     Socket::new(
+//!         SocketConfig::default(),
+//!         &dev1_umem,
+//!         &"xsk_dev1".parse().unwrap(),
+//!         0,
+//!     )
+//! }
 //! .expect("failed to create dev1 socket");
 //!
 //! // Create a UMEM for dev2. Another option is to use the same UMEM
@@ -66,12 +69,15 @@
 //!
 //! // Bind an AF_XDP socket to the interface named `xsk_dev2`, on
 //! // queue 0.
-//! let (_dev2_tx_q, mut dev2_rx_q, dev2_fq_and_cq) = Socket::new(
-//!     SocketConfig::default(),
-//!     &dev2_umem,
-//!     &"xsk_dev2".parse().unwrap(),
-//!     0,
-//! )
+//! // SAFETY: see above.
+//! let (_dev2_tx_q, mut dev2_rx_q, dev2_fq_and_cq) = unsafe {
+//!     Socket::new(
+//!         SocketConfig::default(),
+//!         &dev2_umem,
+//!         &"xsk_dev2".parse().unwrap(),
+//!         0,
+//!     )
+//! }
 //! .expect("failed to create dev2 socket");
 //!
 //! let (mut dev2_fq, _dev2_cq) = dev2_fq_and_cq.expect("missing dev2 fill queue and comp queue");

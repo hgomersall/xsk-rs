@@ -11,7 +11,6 @@ pub use tx_queue::TxQueue;
 
 use libxdp_sys::xsk_socket;
 use std::{
-    borrow::Borrow,
     error::Error,
     fmt, io,
     ptr::{self, NonNull},
@@ -20,54 +19,70 @@ use std::{
 
 use crate::{
     config::{Interface, SocketConfig},
-    ring::{XskRingCons, XskRingProd},
-    umem::{CompQueue, FillQueue, Umem},
+    ring::{XskRingCons, XskRingConsHandle, XskRingProd, XskRingProdHandle},
+    umem::{CompQueue, CtxRings, FillQueue, Umem},
 };
 
-/// Wrapper around a pointer to some AF_XDP socket.
-#[derive(Debug)]
-struct XskSocket(NonNull<xsk_socket>);
-
-impl XskSocket {
-    /// # Safety
-    ///
-    /// Only one instance of this struct may exist since it deletes
-    /// the socket as part of its [`Drop`] impl. If there are copies or
-    /// clones of `ptr` then care must be taken to ensure they aren't
-    /// used once this struct goes out of scope, and that they don't
-    /// delete the socket themselves.
-    unsafe fn new(ptr: NonNull<xsk_socket>) -> Self {
-        Self(ptr)
-    }
-}
-
-impl Drop for XskSocket {
-    fn drop(&mut self) {
-        // SAFETY: unsafe constructor contract guarantees that the
-        // socket has not been deleted already.
-        unsafe {
-            libxdp_sys::xsk_socket__delete(self.0.as_mut());
-        }
-    }
-}
-
-unsafe impl Send for XskSocket {}
-
+/// An AF_XDP socket, along with everything libxdp dereferences when
+/// deleting it.
+///
+/// `xsk_socket__delete` reads back the rx and tx rings it was handed
+/// at creation to work out which memory to unmap, so they have to
+/// outlive it - as do the UMEM's fill and comp rings, which the
+/// `umem` handle keeps alive. Keeping all of them here rather than
+/// beside this struct is what guarantees they do: [`Drop::drop`] runs
+/// before any field is dropped, whatever order the fields are written
+/// in.
 #[derive(Debug)]
 struct SocketInner {
-    // `ptr` must appear before `umem` to ensure correct drop order.
-    _ptr: XskSocket,
-    _umem: Umem,
+    ptr: NonNull<xsk_socket>,
+    _rx_ring: XskRingConsHandle,
+    _tx_ring: XskRingProdHandle,
+    umem: Umem,
 }
 
 impl SocketInner {
-    fn new(ptr: XskSocket, umem: Umem) -> Self {
+    /// # Safety
+    ///
+    /// Only one instance of this struct may exist for `ptr` since it
+    /// deletes the socket as part of its [`Drop`] impl. If there are
+    /// copies or clones of `ptr` then care must be taken to ensure
+    /// they aren't used once this struct goes out of scope, and that
+    /// they don't delete the socket themselves.
+    ///
+    /// `umem` must be the UMEM `ptr` was created from, since that is
+    /// what the deletion is serialised on.
+    unsafe fn new(
+        ptr: NonNull<xsk_socket>,
+        rx_ring: XskRingConsHandle,
+        tx_ring: XskRingProdHandle,
+        umem: Umem,
+    ) -> Self {
         Self {
-            _ptr: ptr,
-            _umem: umem,
+            ptr,
+            _rx_ring: rx_ring,
+            _tx_ring: tx_ring,
+            umem,
         }
     }
+
+    fn as_ptr(&self) -> *mut xsk_socket {
+        self.ptr.as_ptr()
+    }
 }
+
+impl Drop for SocketInner {
+    fn drop(&mut self) {
+        // SAFETY: unsafe constructor contract guarantees that the
+        // socket has not been deleted already and that it was created
+        // from this UMEM, and every ring libxdp is about to
+        // dereference is a field of this struct, so none of them have
+        // been dropped yet.
+        unsafe { self.umem.delete_socket(self.as_ptr()) };
+    }
+}
+
+unsafe impl Send for SocketInner {}
 
 /// An AF_XDP socket.
 ///
@@ -104,6 +119,22 @@ impl Socket {
     /// For further details on using a shared [`Umem`] please see the
     /// [docs](https://www.kernel.org/doc/html/latest/networking/af_xdp.html#xdp-shared-umem-bind-flag).
     ///
+    /// Every queue returned here holds a handle to the socket, which
+    /// is deleted once the last of them is dropped. That includes the
+    /// [`FillQueue`] and [`CompQueue`], as libxdp unmaps their rings
+    /// when the last socket created from this [`Umem`] and bound to
+    /// this `(if_name, queue_id)` pair goes away, so dropping just the
+    /// [`TxQueue`] and [`RxQueue`] will not release the device.
+    ///
+    /// Where that pair is bound to more than once from this [`Umem`],
+    /// the [`FillQueue`] and [`CompQueue`] belong to the socket that
+    /// was handed them, and the device is released only once every
+    /// socket on the pair has gone, that one included.
+    ///
+    /// Deleting the socket takes the same [`Umem`] lock that creating
+    /// one does, so dropping the last of its queues can block while
+    /// another thread creates or drops a socket on that [`Umem`].
+    ///
     /// # Safety
     ///
     /// If sharing the [`Umem`] and the `(if_name, queue_id)` pair is
@@ -122,71 +153,61 @@ impl Socket {
         queue_id: u32,
     ) -> Result<(TxQueue, RxQueue, Option<(FillQueue, CompQueue)>), SocketCreateError> {
         let mut socket_ptr = ptr::null_mut();
-        let mut tx_q = XskRingProd::default();
-        let mut rx_q = XskRingCons::default();
+        let tx_q = XskRingProd::default();
+        let rx_q = XskRingCons::default();
 
-        let (err, fq, cq) = unsafe {
-            umem.with_ptr_and_saved_queues(|xsk_umem, saved_fq_and_cq| {
-                let (mut fq, mut cq) = saved_fq_and_cq
-                    .take()
-                    .unwrap_or_else(|| (Box::default(), Box::default()));
-
-                let err = libxdp_sys::xsk_socket__create_shared(
+        let rings = umem
+            .with_ptr_and_fq_and_cq(|xsk_umem, fq, cq| unsafe {
+                libxdp_sys::xsk_socket__create_shared(
                     &mut socket_ptr,
                     if_name.as_cstr().as_ptr(),
                     queue_id,
                     xsk_umem,
-                    rx_q.as_mut(),
-                    tx_q.as_mut(),
-                    fq.as_mut().as_mut(), // double deref due to Box
-                    cq.as_mut().as_mut(),
+                    rx_q.as_ptr(),
+                    tx_q.as_ptr(),
+                    fq.as_ptr(),
+                    cq.as_ptr(),
                     &config.into(),
-                );
-
-                (err, fq, cq)
+                )
             })
-        };
-
-        if err != 0 {
-            return Err(SocketCreateError {
+            .map_err(|err| SocketCreateError {
                 reason: "non-zero error code returned when creating AF_XDP socket",
-                err: io::Error::from_raw_os_error(-err),
-            });
-        }
+                err: Some(io::Error::from_raw_os_error(-err)),
+            })?;
 
-        let socket_ptr = match NonNull::new(socket_ptr) {
+        let inner = match NonNull::new(socket_ptr) {
             Some(init_xsk) => {
-                // SAFETY: this is the only `XskSocket` instance for
+                // SAFETY: this is the only `SocketInner` instance for
                 // this pointer, and no other pointers to the socket
                 // exist.
-                unsafe { XskSocket::new(init_xsk) }
+                unsafe { SocketInner::new(init_xsk, rx_q.handle(), tx_q.handle(), umem.clone()) }
             }
             None => {
                 return Err(SocketCreateError {
                     reason: "returned socket pointer was null",
-                    err: io::Error::from_raw_os_error(-err),
+                    err: None,
                 });
             }
         };
 
-        let fd = unsafe { libxdp_sys::xsk_socket__fd(socket_ptr.0.as_ref()) };
+        let fd = unsafe { libxdp_sys::xsk_socket__fd(inner.as_ptr()) };
 
         if fd < 0 {
             return Err(SocketCreateError {
                 reason: "failed to retrieve AF_XDP socket file descriptor",
-                err: io::Error::from_raw_os_error(-fd),
+                err: None,
             });
         }
 
         let socket = Socket {
             fd: Fd::new(fd),
-            _inner: Arc::new(Mutex::new(SocketInner::new(socket_ptr, umem.clone()))),
+            _inner: Arc::new(Mutex::new(inner)),
         };
 
         let tx_q = if tx_q.is_ring_null() {
             return Err(SocketCreateError {
                 reason: "returned tx queue ring is null",
-                err: io::Error::from_raw_os_error(-err),
+                err: None,
             });
         } else {
             TxQueue::new(tx_q, socket.clone())
@@ -195,24 +216,24 @@ impl Socket {
         let rx_q = if rx_q.is_ring_null() {
             return Err(SocketCreateError {
                 reason: "returned rx queue ring is null",
-                err: io::Error::from_raw_os_error(-err),
+                err: None,
             });
         } else {
-            RxQueue::new(rx_q, socket)
+            RxQueue::new(rx_q, socket.clone())
         };
 
-        let fq_and_cq = match (fq.is_ring_null(), cq.is_ring_null()) {
-            (true, true) => None,
-            (false, false) => {
-                let fq = FillQueue::new(*fq, umem.clone());
-                let cq = CompQueue::new(*cq, umem.clone());
+        let fq_and_cq = match rings {
+            CtxRings::New(fq, cq) => {
+                let fq = FillQueue::new(fq, socket.clone());
+                let cq = CompQueue::new(cq, socket);
 
                 Some((fq, cq))
             }
-            _ => {
+            CtxRings::Existing => None,
+            CtxRings::Mismatched => {
                 return Err(SocketCreateError {
                     reason: "fill queue xor comp queue ring is null, either both or neither should be non-null",
-                    err: io::Error::from_raw_os_error(-err),
+                    err: None,
                 });
             }
         };
@@ -234,7 +255,7 @@ impl Clone for Socket {
 #[derive(Debug)]
 pub struct SocketCreateError {
     reason: &'static str,
-    err: io::Error,
+    err: Option<io::Error>,
 }
 
 impl fmt::Display for SocketCreateError {
@@ -245,6 +266,6 @@ impl fmt::Display for SocketCreateError {
 
 impl Error for SocketCreateError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.err.borrow())
+        self.err.as_ref().map(|err| err as _)
     }
 }

@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+## Fixed
+- keep the rx, tx, fill and comp rings alive and in place for as long
+  as libxdp needs them. libxdp retains the ring pointers it is passed
+  and dereferences them again during teardown to determine which
+  memory to unmap, so moving or freeing a ring beforehand caused
+  `munmap` to be called with a garbage address. The socket's memory
+  was then never released and subsequent binds to the same device and
+  queue id failed with `EBUSY`. The fill and comp pair is saved on the
+  UMEM and on the context shared by every socket bound to the same
+  device and queue id, so it has to outlive sockets it was never
+  handed to
+- a `FillQueue` or `CompQueue` now keeps its socket alive rather than
+  just the UMEM. One that outlived every other handle to its socket
+  was left reading and writing through an unmapped ring
+- deleting a socket now takes the same lock creating one does, so
+  sockets on a shared `Umem` can be created and dropped from more than
+  one thread. libxdp's per-UMEM refcounts and context list have no
+  synchronisation of their own, and a lost update to either unmaps a
+  context's rings while a socket is still on it, or leaves them mapped
+  for good
+- `SocketCreateError` and `UmemCreateError` no longer answer `source()`
+  with an `io::Error` reading `Success (os error 0)` on the paths that
+  have no OS error behind them. They report `None` there instead
+
+## Changed
+- dropping a `TxQueue` and `RxQueue` no longer deletes the socket if
+  the `FillQueue` or `CompQueue` returned alongside them are still
+  alive. All four now have to go before the device is released
+- dropping the last of a socket's queues can block, its deletion being
+  serialised against creating or deleting a socket on the same `Umem`
+
 ## [0.8.0] - 2025-09-17
 
 ## Changed

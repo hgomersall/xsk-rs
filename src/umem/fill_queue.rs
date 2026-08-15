@@ -1,8 +1,11 @@
 use std::io;
 
-use crate::{ring::XskRingProd, socket::Fd};
+use crate::{
+    ring::XskRingProd,
+    socket::{Fd, Socket},
+};
 
-use super::{Umem, frame::FrameDesc};
+use super::frame::FrameDesc;
 
 /// Used to transfer ownership of [`Umem`](super::Umem) frames from
 /// user-space to kernel-space.
@@ -10,17 +13,27 @@ use super::{Umem, frame::FrameDesc};
 /// These frames will be used to receive packets, and will eventually
 /// be returned via the [`RxQueue`](crate::socket::RxQueue).
 ///
+/// Holding on to this queue keeps the socket it was created with
+/// alive, since libxdp unmaps the fill ring only when the last socket
+/// created from the same [`Umem`](super::Umem) and bound to the same
+/// device and queue id is deleted. Dropping every other handle to
+/// that socket therefore will not release the device; this queue and
+/// the one returned alongside it have to go too.
+///
 /// For more information see the
 /// [docs](https://www.kernel.org/doc/html/latest/networking/af_xdp.html#umem-fill-ring).
 #[derive(Debug)]
 pub struct FillQueue {
     ring: XskRingProd,
-    _umem: Umem,
+    _socket: Socket,
 }
 
 impl FillQueue {
-    pub(crate) fn new(ring: XskRingProd, umem: Umem) -> Self {
-        Self { ring, _umem: umem }
+    pub(crate) fn new(ring: XskRingProd, socket: Socket) -> Self {
+        Self {
+            ring,
+            _socket: socket,
+        }
     }
 
     /// Let the kernel know that the [`Umem`] frames described by
@@ -46,6 +59,7 @@ impl FillQueue {
     ///
     /// [`TxQueue`]: crate::TxQueue
     /// [`RxQueue`]: crate::RxQueue
+    /// [`Umem`]: super::Umem
     #[inline]
     pub unsafe fn produce(&mut self, descs: &[FrameDesc]) -> usize {
         let nb = descs.len() as u32;
@@ -56,19 +70,19 @@ impl FillQueue {
 
         let mut idx = 0;
 
-        let cnt = unsafe { libxdp_sys::xsk_ring_prod__reserve(self.ring.as_mut(), nb, &mut idx) };
+        let cnt = unsafe { libxdp_sys::xsk_ring_prod__reserve(self.ring.as_ptr(), nb, &mut idx) };
 
         if cnt > 0 {
             for desc in descs.iter().take(cnt as usize) {
                 unsafe {
-                    *libxdp_sys::xsk_ring_prod__fill_addr(self.ring.as_mut(), idx) =
+                    *libxdp_sys::xsk_ring_prod__fill_addr(self.ring.as_ptr(), idx) =
                         desc.addr as u64
                 };
 
                 idx = idx.wrapping_add(1);
             }
 
-            unsafe { libxdp_sys::xsk_ring_prod__submit(self.ring.as_mut(), cnt) };
+            unsafe { libxdp_sys::xsk_ring_prod__submit(self.ring.as_ptr(), cnt) };
         }
 
         cnt as usize
@@ -85,14 +99,14 @@ impl FillQueue {
     pub unsafe fn produce_one(&mut self, desc: &FrameDesc) -> usize {
         let mut idx = 0;
 
-        let cnt = unsafe { libxdp_sys::xsk_ring_prod__reserve(self.ring.as_mut(), 1, &mut idx) };
+        let cnt = unsafe { libxdp_sys::xsk_ring_prod__reserve(self.ring.as_ptr(), 1, &mut idx) };
 
         if cnt > 0 {
             unsafe {
-                *libxdp_sys::xsk_ring_prod__fill_addr(self.ring.as_mut(), idx) = desc.addr as u64
+                *libxdp_sys::xsk_ring_prod__fill_addr(self.ring.as_ptr(), idx) = desc.addr as u64
             };
 
-            unsafe { libxdp_sys::xsk_ring_prod__submit(self.ring.as_mut(), cnt) };
+            unsafe { libxdp_sys::xsk_ring_prod__submit(self.ring.as_ptr(), cnt) };
         }
 
         cnt as usize
@@ -176,6 +190,6 @@ impl FillQueue {
     /// [`wakeup`]: Self::wakeup
     #[inline]
     pub fn needs_wakeup(&self) -> bool {
-        unsafe { libxdp_sys::xsk_ring_prod__needs_wakeup(self.ring.as_ref()) != 0 }
+        unsafe { libxdp_sys::xsk_ring_prod__needs_wakeup(self.ring.as_ptr()) != 0 }
     }
 }

@@ -1,6 +1,6 @@
-use crate::ring::XskRingCons;
+use crate::{ring::XskRingCons, socket::Socket};
 
-use super::{Umem, frame::FrameDesc};
+use super::frame::FrameDesc;
 
 /// Used to transfer ownership of [`Umem`](super::Umem) frames from
 /// kernel-space to user-space.
@@ -8,17 +8,27 @@ use super::{Umem, frame::FrameDesc};
 /// Frames received in this queue are those that have been sent via
 /// the [`TxQueue`](crate::socket::TxQueue).
 ///
+/// Holding on to this queue keeps the socket it was created with
+/// alive, since libxdp unmaps the comp ring only when the last socket
+/// created from the same [`Umem`](super::Umem) and bound to the same
+/// device and queue id is deleted. Dropping every other handle to
+/// that socket therefore will not release the device; this queue and
+/// the one returned alongside it have to go too.
+///
 /// For more information see the
 /// [docs](https://www.kernel.org/doc/html/latest/networking/af_xdp.html#umem-completion-ring).
 #[derive(Debug)]
 pub struct CompQueue {
     ring: XskRingCons,
-    _umem: Umem,
+    _socket: Socket,
 }
 
 impl CompQueue {
-    pub(crate) fn new(ring: XskRingCons, umem: Umem) -> Self {
-        Self { ring, _umem: umem }
+    pub(crate) fn new(ring: XskRingCons, socket: Socket) -> Self {
+        Self {
+            ring,
+            _socket: socket,
+        }
     }
 
     /// Update `descs` with details of frames whose contents have been
@@ -40,6 +50,7 @@ impl CompQueue {
     ///
     /// [`TxQueue`]: crate::socket::TxQueue
     /// [`FillQueue`]: crate::FillQueue
+    /// [`Umem`]: super::Umem
     #[inline]
     pub unsafe fn consume(&mut self, descs: &mut [FrameDesc]) -> usize {
         let nb = descs.len() as u32;
@@ -50,12 +61,12 @@ impl CompQueue {
 
         let mut idx = 0;
 
-        let cnt = unsafe { libxdp_sys::xsk_ring_cons__peek(self.ring.as_mut(), nb, &mut idx) };
+        let cnt = unsafe { libxdp_sys::xsk_ring_cons__peek(self.ring.as_ptr(), nb, &mut idx) };
 
         if cnt > 0 {
             for desc in descs.iter_mut().take(cnt as usize) {
                 let addr =
-                    unsafe { *libxdp_sys::xsk_ring_cons__comp_addr(self.ring.as_ref(), idx) };
+                    unsafe { *libxdp_sys::xsk_ring_cons__comp_addr(self.ring.as_ptr(), idx) };
 
                 desc.addr = addr as usize;
                 desc.lengths.data = 0;
@@ -65,7 +76,7 @@ impl CompQueue {
                 idx = idx.wrapping_add(1);
             }
 
-            unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_mut(), cnt) };
+            unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_ptr(), cnt) };
         }
 
         cnt as usize
@@ -82,17 +93,17 @@ impl CompQueue {
     pub unsafe fn consume_one(&mut self, desc: &mut FrameDesc) -> usize {
         let mut idx = 0;
 
-        let cnt = unsafe { libxdp_sys::xsk_ring_cons__peek(self.ring.as_mut(), 1, &mut idx) };
+        let cnt = unsafe { libxdp_sys::xsk_ring_cons__peek(self.ring.as_ptr(), 1, &mut idx) };
 
         if cnt > 0 {
-            let addr = unsafe { *libxdp_sys::xsk_ring_cons__comp_addr(self.ring.as_ref(), idx) };
+            let addr = unsafe { *libxdp_sys::xsk_ring_cons__comp_addr(self.ring.as_ptr(), idx) };
 
             desc.addr = addr as usize;
             desc.lengths.data = 0;
             desc.lengths.headroom = 0;
             desc.options = 0;
 
-            unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_mut(), cnt) };
+            unsafe { libxdp_sys::xsk_ring_cons__release(self.ring.as_ptr(), cnt) };
         }
 
         cnt as usize
