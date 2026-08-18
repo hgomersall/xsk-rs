@@ -1,7 +1,11 @@
 use libc::{EAGAIN, EBUSY, ENETDOWN, ENOBUFS, MSG_DONTWAIT};
 use std::{io, os::unix::prelude::AsRawFd, ptr};
 
-use crate::{ring::XskRingProd, umem::frame::FrameDesc, util};
+use crate::{
+    ring::{self, XskRingProd},
+    umem::frame::FrameDesc,
+    util,
+};
 
 use super::{Socket, fd::Fd};
 
@@ -142,6 +146,17 @@ impl TxQueue {
         }
 
         Ok(cnt)
+    }
+
+    /// The number of free slots on the ring.
+    ///
+    /// Reads the current consumer position rather than a cached one,
+    /// so the count is exact.
+    #[inline]
+    pub fn nb_free_exact(&mut self) -> u32 {
+        // SAFETY: the ring is initialised and `&mut self` excludes
+        // any other access to it.
+        unsafe { ring::prod_nb_free_exact(self.ring.as_ptr()) }
     }
 
     /// Wake up the kernel to continue processing produced frames.

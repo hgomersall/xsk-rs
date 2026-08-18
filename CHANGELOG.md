@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## Added
+
+- `TxQueue::nb_free_exact`, `FillQueue::nb_free_exact`, `RxQueue::nb_avail_exact` and `CompQueue::nb_avail_exact`.
+  These give the number of free slots on a producer ring and the number of entries waiting on a consumer ring, and
+  are exact because they refresh libxdp's cached view of the ring rather than trusting it.
+
 ## [0.9.0] - 2026-08-15
 
 ## Added

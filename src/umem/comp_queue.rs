@@ -1,4 +1,7 @@
-use crate::{ring::XskRingCons, socket::Socket};
+use crate::{
+    ring::{self, XskRingCons},
+    socket::Socket,
+};
 
 use super::frame::FrameDesc;
 
@@ -107,5 +110,16 @@ impl CompQueue {
         }
 
         cnt as usize
+    }
+
+    /// The number of entries ready to be consumed.
+    ///
+    /// Reads the current producer position rather than a cached one,
+    /// so this can be used to watch a backlog without consuming it.
+    #[inline]
+    pub fn nb_avail_exact(&mut self) -> u32 {
+        // SAFETY: the ring is initialised and `&mut self` excludes
+        // any other access to it.
+        unsafe { ring::cons_nb_avail_exact(self.ring.as_ptr()) }
     }
 }

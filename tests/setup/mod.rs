@@ -4,7 +4,12 @@ pub use util::PacketGenerator;
 pub mod veth_setup;
 pub use veth_setup::{LinkIpAddr, VethDevConfig};
 
-use std::{net::Ipv4Addr, num::NonZeroU32};
+use std::{
+    net::Ipv4Addr,
+    num::NonZeroU32,
+    thread,
+    time::{Duration, Instant},
+};
 use xsk_rs::{
     config::{Interface, SocketConfig, UmemConfig},
     socket::{RxQueue, Socket, TxQueue},
@@ -16,6 +21,30 @@ pub const ETHERNET_PACKET: [u8; 42] = [
     0x08, 0x00, 0x06, 0x04, 0x00, 0x01, 0xf6, 0xe0, 0xf6, 0xc9, 0x60, 0x0a, 0xc0, 0xa8, 0x45, 0x01,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0xa8, 0x45, 0xfe,
 ];
+
+/// How long the tests wait on the kernel before giving up.
+pub const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Blocks until `cond` holds, panicking if it has not done so within
+/// `timeout`.
+///
+/// Work handed to the kernel is completed asynchronously, so a queue
+/// read straight after triggering it may find nothing there yet.
+pub fn wait_until<F>(timeout: Duration, mut cond: F)
+where
+    F: FnMut() -> bool,
+{
+    let deadline = Instant::now() + timeout;
+
+    while !cond() {
+        assert!(
+            Instant::now() < deadline,
+            "condition not met within {timeout:?}"
+        );
+
+        thread::sleep(Duration::from_millis(1));
+    }
+}
 
 pub struct Xsk {
     pub umem: Umem,

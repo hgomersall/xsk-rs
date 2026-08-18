@@ -1,7 +1,7 @@
 use std::io;
 
 use crate::{
-    ring::XskRingProd,
+    ring::{self, XskRingProd},
     socket::{Fd, Socket},
 };
 
@@ -163,6 +163,17 @@ impl FillQueue {
         }
 
         Ok(cnt)
+    }
+
+    /// The number of free slots on the ring.
+    ///
+    /// Reads the current consumer position rather than a cached one,
+    /// so the count is exact.
+    #[inline]
+    pub fn nb_free_exact(&mut self) -> u32 {
+        // SAFETY: the ring is initialised and `&mut self` excludes
+        // any other access to it.
+        unsafe { ring::prod_nb_free_exact(self.ring.as_ptr()) }
     }
 
     /// Wake up the kernel to let it know it can continue using the
