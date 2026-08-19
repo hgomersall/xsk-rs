@@ -23,16 +23,26 @@ jobs:
       - run: cargo check
 
   test:
-    name: Test
+    name: Test (${{ matrix.libxdp_build }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - libxdp_build: makefile
+            cargo_args: ""
+          - libxdp_build: cc
+            cargo_args: "--features=use_cc_build"
     steps:
       - uses: actions/checkout@v4
       - run: |
           sudo apt update
-          sudo apt install clang llvm gcc-multilib libelf-dev libpcap-dev build-essential
+          sudo apt install clang llvm gcc-multilib libelf-dev libpcap-dev build-essential m4
       - uses: dtolnay/rust-toolchain@stable
       - run: ./run_all_tests.sh
-      - run: cargo test --doc
+        env:
+          CARGO_ARGS: ${{ matrix.cargo_args }}
+      - run: cargo test --doc ${{ matrix.cargo_args }}
 
   miri:
     name: Miri
