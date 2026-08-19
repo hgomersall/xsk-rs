@@ -1,7 +1,7 @@
 use std::io;
 
 use crate::{
-    ring::XskRingProd,
+    ring::{self, XskRingProd},
     socket::{Fd, Socket},
 };
 
@@ -163,6 +163,37 @@ impl FillQueue {
         }
 
         Ok(cnt)
+    }
+
+    /// The number of free slots on the ring, cached where possible.
+    ///
+    /// Answers from libxdp's cached consumer position while that
+    /// cache holds at least `nb` slots, and reads the current
+    /// position otherwise. A cached position only ever trails the
+    /// real one, so the count is never an overestimate, and it is
+    /// not capped at `nb`.
+    ///
+    /// See [`nb_free_exact`] for a count that is always up to date.
+    ///
+    /// [`nb_free_exact`]: Self::nb_free_exact
+    #[inline]
+    pub fn nb_free(&mut self, nb: u32) -> u32 {
+        // SAFETY: the ring is initialised and `&mut self` excludes
+        // any other access to it.
+        unsafe { libxdp_sys::xsk_prod_nb_free(self.ring.as_ptr(), nb) }
+    }
+
+    /// The number of free slots on the ring.
+    ///
+    /// Reads the current consumer position rather than a cached one,
+    /// so the count is exact. See [`nb_free`] for the cached count.
+    ///
+    /// [`nb_free`]: Self::nb_free
+    #[inline]
+    pub fn nb_free_exact(&mut self) -> u32 {
+        // SAFETY: the ring is initialised and `&mut self` excludes
+        // any other access to it.
+        unsafe { ring::prod_nb_free_exact(self.ring.as_ptr()) }
     }
 
     /// Wake up the kernel to let it know it can continue using the
