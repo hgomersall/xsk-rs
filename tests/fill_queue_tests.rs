@@ -141,6 +141,60 @@ async fn nb_free_exact_reflects_frames_taken_by_the_kernel() {
     build_configs_and_run_test(test).await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn nb_free_is_not_capped_at_nb() {
+    fn test(dev1: (Xsk, PacketGenerator), _dev2: (Xsk, PacketGenerator)) {
+        let mut xsk1 = dev1.0;
+
+        assert_eq!(xsk1.fq.nb_free(1), FQ_SIZE);
+    }
+
+    build_configs_and_run_test(test).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn nb_free_can_answer_from_a_stale_cache() {
+    fn test(dev1: (Xsk, PacketGenerator), dev2: (Xsk, PacketGenerator)) {
+        let mut xsk1 = dev1.0;
+        let mut xsk2 = dev2.0;
+
+        // A slot is left free, so that the cache has an answer to
+        // give and no reload is forced.
+        let nb = (FQ_SIZE - 1) as usize;
+
+        assert_eq!(unsafe { xsk1.fq.produce(&xsk1.descs[..nb]) }, nb);
+
+        unsafe {
+            xsk2.umem
+                .data_mut(&mut xsk2.descs[0])
+                .cursor()
+                .write_all(&ETHERNET_PACKET[..])
+                .unwrap();
+
+            assert_eq!(xsk2.tx_q.produce_and_wakeup(&xsk2.descs[..1]).unwrap(), 1);
+        }
+
+        // The kernel takes a fill queue entry to receive into, so a
+        // received packet means the ring has moved on. Arrival is
+        // watched on the rx queue so that the fill ring's cached
+        // consumer position is left as the reservations left it.
+        wait_until(WAIT_TIMEOUT, || xsk1.rx_q.nb_avail_exact() == 1);
+
+        assert_eq!(xsk1.fq.nb_free(1), 1);
+
+        // How many entries the kernel takes to receive a packet, and
+        // when, is up to it, so only that it takes some is asserted.
+        // The rx ring is published ahead of the fill ring's consumer
+        // position, so the wait is needed even though a packet has
+        // already arrived.
+        wait_until(WAIT_TIMEOUT, || xsk1.fq.nb_free_exact() > 1);
+    }
+
+    build_configs_and_run_test(test).await
+}
+
 async fn build_configs_and_run_test<F>(test: F)
 where
     F: Fn((Xsk, PacketGenerator), (Xsk, PacketGenerator)) + Send + 'static,

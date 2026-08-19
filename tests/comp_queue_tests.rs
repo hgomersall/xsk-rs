@@ -279,6 +279,96 @@ async fn nb_avail_exact_does_not_consume() {
     build_configs_and_run_test(test).await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn nb_avail_on_fresh_queue_is_zero() {
+    fn test(dev1: (Xsk, PacketGenerator), _dev2: (Xsk, PacketGenerator)) {
+        let mut xsk1 = dev1.0;
+
+        assert_eq!(xsk1.cq.nb_avail(1), 0);
+    }
+
+    build_configs_and_run_test(test).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn nb_avail_is_capped_at_nb() {
+    fn test(dev1: (Xsk, PacketGenerator), _dev2: (Xsk, PacketGenerator)) {
+        let mut xsk1 = dev1.0;
+
+        for i in 0..3 {
+            unsafe {
+                xsk1.umem
+                    .data_mut(&mut xsk1.descs[i])
+                    .cursor()
+                    .write_all(&ETHERNET_PACKET[..])
+                    .unwrap();
+            }
+        }
+
+        assert_eq!(
+            unsafe { xsk1.tx_q.produce_and_wakeup(&xsk1.descs[..3]).unwrap() },
+            3
+        );
+
+        // Waiting on the cached count would spin forever, since
+        // libxdp stops refreshing the cache once it has anything to
+        // give.
+        wait_until(WAIT_TIMEOUT, || xsk1.cq.nb_avail_exact() == 3);
+
+        assert_eq!(xsk1.cq.nb_avail(2), 2);
+
+        assert_eq!(xsk1.cq.nb_avail(5), 3);
+    }
+
+    build_configs_and_run_test(test).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn nb_avail_can_answer_from_a_stale_cache() {
+    fn test(dev1: (Xsk, PacketGenerator), _dev2: (Xsk, PacketGenerator)) {
+        let mut xsk1 = dev1.0;
+
+        for i in 0..3 {
+            unsafe {
+                xsk1.umem
+                    .data_mut(&mut xsk1.descs[i])
+                    .cursor()
+                    .write_all(&ETHERNET_PACKET[..])
+                    .unwrap();
+            }
+        }
+
+        // Leaves libxdp's cache holding one entry, which is what
+        // stops it reloading later on.
+        assert_eq!(
+            unsafe { xsk1.tx_q.produce_and_wakeup(&xsk1.descs[..1]).unwrap() },
+            1
+        );
+
+        wait_until(WAIT_TIMEOUT, || xsk1.cq.nb_avail_exact() == 1);
+
+        assert_eq!(
+            unsafe { xsk1.tx_q.produce_and_wakeup(&xsk1.descs[1..3]).unwrap() },
+            2
+        );
+
+        // Nothing on this side refreshes the cache, so there is no
+        // condition to wait on: the count below reads one whether the
+        // frames have completed or not, and the sleep only makes it
+        // likely that they have.
+        thread::sleep(Duration::from_secs(1));
+
+        assert_eq!(xsk1.cq.nb_avail(CQ_SIZE), 1);
+
+        wait_until(WAIT_TIMEOUT, || xsk1.cq.nb_avail_exact() == 3);
+    }
+
+    build_configs_and_run_test(test).await
+}
+
 async fn build_configs_and_run_test<F>(test: F)
 where
     F: Fn((Xsk, PacketGenerator), (Xsk, PacketGenerator)) + Send + 'static,

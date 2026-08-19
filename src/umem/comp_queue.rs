@@ -112,10 +112,32 @@ impl CompQueue {
         cnt as usize
     }
 
+    /// The number of entries ready to be consumed, up to `nb`.
+    ///
+    /// Answers from libxdp's cached producer position unless that
+    /// cache is empty, in which case the current position is read.
+    /// A cached position only ever trails the real one, so the count
+    /// is never an overestimate.
+    ///
+    /// Note that passing the ring size does not give an exact count,
+    /// since a non-empty cache is never refreshed. See
+    /// [`nb_avail_exact`] for that.
+    ///
+    /// [`nb_avail_exact`]: Self::nb_avail_exact
+    #[inline]
+    pub fn nb_avail(&mut self, nb: u32) -> u32 {
+        // SAFETY: the ring is initialised and `&mut self` excludes
+        // any other access to it.
+        unsafe { libxdp_sys::xsk_cons_nb_avail(self.ring.as_ptr(), nb) }
+    }
+
     /// The number of entries ready to be consumed.
     ///
     /// Reads the current producer position rather than a cached one,
     /// so this can be used to watch a backlog without consuming it.
+    /// See [`nb_avail`] for the cached count.
+    ///
+    /// [`nb_avail`]: Self::nb_avail
     #[inline]
     pub fn nb_avail_exact(&mut self) -> u32 {
         // SAFETY: the ring is initialised and `&mut self` excludes

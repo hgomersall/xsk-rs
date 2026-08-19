@@ -139,6 +139,89 @@ async fn nb_free_exact_reflects_completions() {
     build_configs_and_run_test(test).await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn nb_free_is_not_capped_at_nb() {
+    fn test(dev1: (Xsk, PacketGenerator), _dev2: (Xsk, PacketGenerator)) {
+        let mut xsk1 = dev1.0;
+
+        assert_eq!(xsk1.tx_q.nb_free(1), TX_Q_SIZE);
+    }
+
+    build_configs_and_run_test(test).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn nb_free_can_answer_from_a_stale_cache() {
+    fn test(dev1: (Xsk, PacketGenerator), _dev2: (Xsk, PacketGenerator)) {
+        let mut xsk1 = dev1.0;
+
+        for i in 0..2 {
+            unsafe {
+                xsk1.umem
+                    .data_mut(&mut xsk1.descs[i])
+                    .cursor()
+                    .write_all(&ETHERNET_PACKET[..])
+                    .unwrap();
+            }
+        }
+
+        assert_eq!(
+            unsafe { xsk1.tx_q.produce_and_wakeup(&xsk1.descs[..2]).unwrap() },
+            2
+        );
+
+        // The kernel releases a tx slot before completing the frame
+        // that occupied it, so the ring has two slots free again by
+        // the time the completions show up. Progress is watched on
+        // the comp queue rather than the tx queue so that the tx
+        // ring's cached consumer position is left as the two
+        // reservations left it.
+        wait_until(WAIT_TIMEOUT, || xsk1.cq.nb_avail_exact() == 2);
+
+        // Two slots is enough to answer the request, so the stale
+        // cache stands.
+        assert_eq!(xsk1.tx_q.nb_free(1), 2);
+
+        assert_eq!(xsk1.tx_q.nb_free_exact(), TX_Q_SIZE);
+    }
+
+    build_configs_and_run_test(test).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn nb_free_reloads_when_the_cache_falls_short() {
+    fn test(dev1: (Xsk, PacketGenerator), _dev2: (Xsk, PacketGenerator)) {
+        let mut xsk1 = dev1.0;
+
+        let nb = TX_Q_SIZE as usize;
+
+        for i in 0..nb {
+            unsafe {
+                xsk1.umem
+                    .data_mut(&mut xsk1.descs[i])
+                    .cursor()
+                    .write_all(&ETHERNET_PACKET[..])
+                    .unwrap();
+            }
+        }
+
+        assert_eq!(
+            unsafe { xsk1.tx_q.produce_and_wakeup(&xsk1.descs[..nb]).unwrap() },
+            nb
+        );
+
+        // A full ring leaves the cache with nothing to give, so a
+        // request for a single slot has to reload the real consumer
+        // position and picks up every completed frame with it.
+        wait_until(WAIT_TIMEOUT, || xsk1.tx_q.nb_free(1) == TX_Q_SIZE);
+    }
+
+    build_configs_and_run_test(test).await
+}
+
 async fn build_configs_and_run_test<F>(test: F)
 where
     F: Fn((Xsk, PacketGenerator), (Xsk, PacketGenerator)) + Send + 'static,
