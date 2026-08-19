@@ -9,6 +9,15 @@ repository = "https://github.com/DouglasGray/xsk-rs"
 readme = "README.md"
 keywords = ["AF_XDP", "XSK", "eBPF", "XDP"]
 
+[features]
+# Builds the vendored libxdp with the `cc` crate rather than by running its
+# Makefile, so the build writes only to `OUT_DIR` and is configured up front
+# instead of by whatever `configure` finds on the host.
+use_cc_build = ["libxdp-sys/use_cc_build"]
+
+[package.metadata.docs.rs]
+features = ["use_cc_build"]
+
 [dependencies]
 bitflags = "2.13.1"
 cfg-if = "1.0.4"

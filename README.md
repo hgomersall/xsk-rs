@@ -37,17 +37,29 @@ binaries directly.
 `run_all_tests.sh` does that for the tests, so run it *without*
 `sudo`: it builds as the invoking user and elevates only the test
 binaries. Any arguments are forwarded to each of them, so a test
-filter or `--nocapture` can be passed through.
+filter or `--nocapture` can be passed through. Arguments for cargo
+itself go in `CARGO_ARGS`.
 
 ```
 # tests
 ./run_all_tests.sh
+
+# tests, against a libxdp built by cc rather than by its Makefile
+CARGO_ARGS=--features=use_cc_build ./run_all_tests.sh
 
 # examples
 cargo build --examples --release
 sudo target/release/examples/hello_xdp
 sudo target/release/examples/dev1_to_dev2 -- [FLAGS] [OPTIONS]
 ```
+
+### Features
+
+`use_cc_build` forwards to the `libxdp-sys` feature of the same name.
+It builds the vendored libxdp with the `cc` crate rather than by
+running its Makefile, so the build writes only to `OUT_DIR` and is
+configured up front instead of by whatever `configure` finds on the
+host.
 
 ### Compatibility
 
