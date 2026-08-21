@@ -2,13 +2,15 @@
 
 ## Unreleased
 
+## [0.10.0] - 2026-08-21
+
 ## Added
 
-- `TxQueue::nb_free_exact`, `FillQueue::nb_free_exact`, `RxQueue::nb_avail_exact` and `CompQueue::nb_avail_exact`.
-  These give the number of free slots on a producer ring and the number of entries waiting on a consumer ring, and
-  are exact because they refresh libxdp's cached view of the ring rather than trusting it.
-- `TxQueue::nb_free`, `FillQueue::nb_free`, `RxQueue::nb_avail` and `CompQueue::nb_avail`. These give the same
-  counts without forcing a refresh, so they may fall short of what the ring really holds.
+- `TxQueue::nb_free_exact`, `FillQueue::nb_free_exact`, `RxQueue::nb_avail_exact` and `CompQueue::nb_avail_exact`. These
+  give the number of free slots on a producer ring and the number of entries waiting on a consumer ring, and are exact
+  because they refresh libxdp's cached view of the ring rather than trusting it.
+- `TxQueue::nb_free`, `FillQueue::nb_free`, `RxQueue::nb_avail` and `CompQueue::nb_avail`. These give the same counts
+  without forcing a refresh, so they may fall short of what the ring really holds.
 - `use_cc_build`, a feature forwarding to the `libxdp-sys` feature of the same name. It builds the vendored libxdp with
   the `cc` crate rather than by running its Makefile, so the build writes only to `OUT_DIR` and is configured up front
   instead of by whatever `configure` finds on the host
