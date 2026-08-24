@@ -4,6 +4,8 @@ use libxdp_sys::{
 };
 use std::{error, fmt};
 
+use crate::util;
+
 use super::{FrameSize, QueueSize};
 
 /// Builder for a [`UmemConfig`](Config).
@@ -19,7 +21,7 @@ impl ConfigBuilder {
     }
 
     /// Set the frame size. Default is
-    /// [`XSK_UMEM__DEFAULT_FRAME_SIZE`].
+    /// [`XSK_UMEM__DEFAULT_FRAME_SIZE`]. Must be a power of two.
     pub fn frame_size(&mut self, size: FrameSize) -> &mut Self {
         self.config.frame_size = size;
         self
@@ -43,7 +45,8 @@ impl ConfigBuilder {
     /// [`XSK_UMEM__DEFAULT_FRAME_HEADROOM`].
     ///
     /// Not to be confused with [`XDP_PACKET_HEADROOM`] which is the
-    /// amount of headroom reserved by XDP.
+    /// amount of headroom reserved by XDP. This headroom sits at the
+    /// start of the frame, ahead of the XDP program's.
     pub fn frame_headroom(&mut self, headroom: u32) -> &mut Self {
         self.config.frame_headroom = headroom;
         self
@@ -53,19 +56,31 @@ impl ConfigBuilder {
     /// in this builder.
     ///
     /// May fail if some of the values are incompatible. For example,
-    /// if the requested frame headroom exceeds the frame size.
+    /// if the requested frame headroom leaves no room in the frame for
+    /// packet data, or if the frame size is not a power of two.
     pub fn build(&self) -> Result<Config, ConfigBuildError> {
         let frame_size = self.config.frame_size.get();
-        let total_headroom = XDP_PACKET_HEADROOM + self.config.frame_headroom;
 
-        if total_headroom > frame_size {
-            Err(ConfigBuildError {
-                frame_size,
-                total_headroom,
-            })
-        } else {
-            Ok(self.config)
+        if !util::is_pow_of_two(frame_size) {
+            return Err(ConfigBuildError {
+                kind: ConfigBuildErrorKind::FrameSizeNotPowerOfTwo { frame_size },
+            });
         }
+
+        // Widened, since the two headrooms are each free to be any
+        // `u32` and so can overflow one when added.
+        let total_headroom = (XDP_PACKET_HEADROOM as u64) + (self.config.frame_headroom as u64);
+
+        if total_headroom >= (frame_size as u64) {
+            return Err(ConfigBuildError {
+                kind: ConfigBuildErrorKind::TotalHeadroomLeavesNoRoomForData {
+                    frame_size,
+                    total_headroom,
+                },
+            });
+        }
+
+        Ok(self.config)
     }
 }
 
@@ -77,6 +92,9 @@ impl ConfigBuilder {
 /// ([`XDP_PACKET_HEADROOM`]) and any non-zero `frame_headroom`. Use
 /// the [`mtu`](Config::mtu) function to determine whether the frame
 /// is large enough to hold the data you wish to transmit.
+///
+/// A frame is laid out as the user's `frame_headroom`, then the XDP
+/// program's [`XDP_PACKET_HEADROOM`], then the packet data.
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     frame_size: FrameSize,
@@ -112,7 +130,8 @@ impl Config {
         XDP_PACKET_HEADROOM
     }
 
-    /// The frame headroom available to the user.
+    /// The frame headroom available to the user, at the start of the
+    /// frame.
     pub fn frame_headroom(&self) -> u32 {
         self.frame_headroom
     }
@@ -153,17 +172,34 @@ impl From<Config> for xsk_umem_config {
 /// Error detailing why [`UmemConfig`](Config) creation failed.
 #[derive(Debug)]
 pub struct ConfigBuildError {
-    frame_size: u32,
-    total_headroom: u32,
+    kind: ConfigBuildErrorKind,
+}
+
+#[derive(Debug)]
+enum ConfigBuildErrorKind {
+    TotalHeadroomLeavesNoRoomForData {
+        frame_size: u32,
+        total_headroom: u64,
+    },
+    FrameSizeNotPowerOfTwo {
+        frame_size: u32,
+    },
 }
 
 impl fmt::Display for ConfigBuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "total headroom {} cannot be greater than frame size {}",
-            self.total_headroom, self.frame_size
-        )
+        match self.kind {
+            ConfigBuildErrorKind::TotalHeadroomLeavesNoRoomForData {
+                frame_size,
+                total_headroom,
+            } => write!(
+                f,
+                "total headroom {total_headroom} must be less than frame size {frame_size}"
+            ),
+            ConfigBuildErrorKind::FrameSizeNotPowerOfTwo { frame_size } => {
+                write!(f, "expected a power of two as frame size, got {frame_size}")
+            }
+        }
     }
 }
 
@@ -181,15 +217,27 @@ mod tests {
     fn frame_size_must_be_greater_than_total_headroom() {
         assert!(
             ConfigBuilder::new()
-                .frame_headroom(XDP_UMEM_MIN_CHUNK_SIZE - XDP_PACKET_HEADROOM)
+                .frame_headroom(XDP_UMEM_MIN_CHUNK_SIZE - (XDP_PACKET_HEADROOM + 1))
                 .frame_size(XDP_UMEM_MIN_CHUNK_SIZE.try_into().unwrap())
                 .build()
                 .is_ok()
         );
 
+        // Leaves a zero length mtu.
         assert!(
             ConfigBuilder::new()
-                .frame_headroom(XDP_UMEM_MIN_CHUNK_SIZE - (XDP_PACKET_HEADROOM - 1))
+                .frame_headroom(XDP_UMEM_MIN_CHUNK_SIZE - XDP_PACKET_HEADROOM)
+                .frame_size(XDP_UMEM_MIN_CHUNK_SIZE.try_into().unwrap())
+                .build()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn frame_headroom_that_overflows_the_total_is_rejected() {
+        assert!(
+            ConfigBuilder::new()
+                .frame_headroom(u32::MAX)
                 .frame_size(XDP_UMEM_MIN_CHUNK_SIZE.try_into().unwrap())
                 .build()
                 .is_err()

@@ -13,6 +13,7 @@ use super::{
     FrameLayout,
     frame::{Data, DataMut, FrameDesc, Headroom, HeadroomMut},
 };
+use crate::util;
 
 /// A framed, memory mapped region which functions as the working
 /// memory for some UMEM.
@@ -69,12 +70,15 @@ impl UmemRegion {
     /// A pointer to the headroom segment of the frame described by
     /// `desc`.
     ///
+    /// The headroom the user reserves sits at the start of the frame,
+    /// ahead of the headroom the kernel reserves for the XDP program.
+    ///
     /// # Safety
     ///
     /// `desc` must describe a frame belonging to this [`UmemRegion`].
     #[inline]
     unsafe fn headroom_ptr(&self, desc: &FrameDesc) -> *mut u8 {
-        let addr = desc.addr - self.layout.frame_headroom;
+        let addr = self.layout.frame_start(desc.addr);
         unsafe { self.as_ptr().add(addr) as *mut u8 }
     }
 
@@ -87,6 +91,37 @@ impl UmemRegion {
     #[inline]
     unsafe fn data_ptr(&self, desc: &FrameDesc) -> *mut u8 {
         unsafe { self.as_ptr().add(desc.addr) as *mut u8 }
+    }
+
+    /// The number of bytes between the start of the frame described
+    /// by `desc` and the start of its packet data segment, capped at
+    /// the frame headroom.
+    ///
+    /// Equal to the frame headroom whenever the packet starts where
+    /// [`Umem::new`] put it, and shorter when it starts inside the
+    /// headroom.
+    ///
+    /// [`Umem::new`]: super::Umem::new
+    #[inline]
+    fn headroom_capacity(&self, desc: &FrameDesc) -> usize {
+        util::min_usize(
+            desc.addr - self.layout.frame_start(desc.addr),
+            self.layout.frame_headroom,
+        )
+    }
+
+    /// The number of bytes between the start of the packet data
+    /// segment of the frame described by `desc` and the end of that
+    /// frame.
+    ///
+    /// Equal to the mtu whenever the packet starts where [`Umem::new`]
+    /// put it, and larger or smaller when an XDP program has moved
+    /// it.
+    ///
+    /// [`Umem::new`]: super::Umem::new
+    #[inline]
+    fn data_capacity(&self, desc: &FrameDesc) -> usize {
+        (self.layout.frame_start(desc.addr) + self.layout.frame_size()) - desc.addr
     }
 
     /// See docs for [`super::Umem::frame`].
@@ -125,9 +160,9 @@ impl UmemRegion {
         let data_ptr = unsafe { self.data_ptr(desc) };
 
         let headroom =
-            unsafe { slice::from_raw_parts_mut(headroom_ptr, self.layout.frame_headroom) };
+            unsafe { slice::from_raw_parts_mut(headroom_ptr, self.headroom_capacity(desc)) };
 
-        let data = unsafe { slice::from_raw_parts_mut(data_ptr, self.layout.mtu) };
+        let data = unsafe { slice::from_raw_parts_mut(data_ptr, self.data_capacity(desc)) };
 
         (
             HeadroomMut::new(&mut desc.lengths.headroom, headroom),
@@ -142,7 +177,7 @@ impl UmemRegion {
         let headroom_ptr = unsafe { self.headroom_ptr(desc) };
 
         let headroom =
-            unsafe { slice::from_raw_parts_mut(headroom_ptr, self.layout.frame_headroom) };
+            unsafe { slice::from_raw_parts_mut(headroom_ptr, self.headroom_capacity(desc)) };
 
         HeadroomMut::new(&mut desc.lengths.headroom, headroom)
     }
@@ -153,7 +188,7 @@ impl UmemRegion {
         // SAFETY: see `frame_mut`.
         let data_ptr = unsafe { self.data_ptr(desc) };
 
-        let data = unsafe { slice::from_raw_parts_mut(data_ptr, self.layout.mtu) };
+        let data = unsafe { slice::from_raw_parts_mut(data_ptr, self.data_capacity(desc)) };
 
         DataMut::new(&mut desc.lengths.data, data)
     }

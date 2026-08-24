@@ -14,13 +14,23 @@ use std::{
 ///
 /// Not to be confused with the [`frame_headroom`] and [`mtu`], the
 /// lengths here describe the amount of data that has been written to
-/// either segment, either by the kernel or by the user. Hence they
-/// vary as frames are used to send and receive data.
+/// either segment. Hence they vary as frames are used to send and
+/// receive data.
 ///
 /// The two sets of values are related however, in that `headroom`
 /// will always be less than or equal to [`frame_headroom`], and
-/// `data` less than or equal to [`mtu`].
+/// `data` less than or equal to [`mtu`] unless an XDP program has
+/// moved the start of the packet.
 ///
+/// Only `data` is ever set from what the kernel reports. There is no
+/// way for it to describe how much of the headroom it wrote, so
+/// `headroom` is reset to zero whenever a descriptor is populated by
+/// the [`RxQueue`] or [`CompQueue`]. The contents of the headroom
+/// survive, so a length known out of band can be restored with
+/// [`Cursor::set_pos`].
+///
+/// [`RxQueue`]: crate::RxQueue
+/// [`CompQueue`]: crate::CompQueue
 /// [`frame_headroom`]: crate::config::UmemConfig::frame_headroom
 /// [`mtu`]: crate::config::UmemConfig::mtu
 #[derive(Debug, Default, Clone, Copy)]
