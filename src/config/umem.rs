@@ -197,6 +197,23 @@ mod tests {
     }
 
     #[test]
+    fn frame_size_must_be_a_power_of_two() {
+        assert!(
+            ConfigBuilder::new()
+                .frame_size(XDP_UMEM_MIN_CHUNK_SIZE.try_into().unwrap())
+                .build()
+                .is_ok()
+        );
+
+        assert!(
+            ConfigBuilder::new()
+                .frame_size((XDP_UMEM_MIN_CHUNK_SIZE + 1).try_into().unwrap())
+                .build()
+                .is_err()
+        );
+    }
+
+    #[test]
     fn frame_mtu_has_expected_value() {
         let frame_headroom = 1024;
 
