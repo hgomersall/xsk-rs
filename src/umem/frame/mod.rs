@@ -437,9 +437,11 @@ mod tests {
 
         let umem_region = UmemRegion::new(frame_count, layout, false).unwrap();
 
-        let mut desc_0 = FrameDesc::new(0 * frame_size + layout.frame_headroom);
+        let frame_addr = |i: usize| i * frame_size + layout.frame_headroom;
 
-        let mut desc_1 = FrameDesc::new(1 * frame_size + layout.frame_headroom);
+        let mut desc_0 = FrameDesc::new(frame_addr(0));
+
+        let mut desc_1 = FrameDesc::new(frame_addr(1));
 
         let mut xdp_desc = xdp_desc {
             addr: 0,
@@ -454,10 +456,7 @@ mod tests {
 
         desc_0.write_xdp_desc(&mut xdp_desc);
 
-        assert_eq!(
-            xdp_desc.addr,
-            (0 * frame_size + layout.frame_headroom) as u64
-        );
+        assert_eq!(xdp_desc.addr, frame_addr(0) as u64);
         assert_eq!(xdp_desc.len, 5);
         assert_eq!(xdp_desc.options, 0);
 
@@ -468,35 +467,20 @@ mod tests {
 
         desc_1.write_xdp_desc(&mut xdp_desc);
 
-        assert_eq!(
-            xdp_desc.addr,
-            (1 * frame_size + layout.frame_headroom) as u64
-        );
+        assert_eq!(xdp_desc.addr, frame_addr(1) as u64);
         assert_eq!(xdp_desc.len, 6);
         assert_eq!(xdp_desc.options, 0);
 
         assert_eq!(
             unsafe {
-                slice::from_raw_parts(
-                    umem_region
-                        .as_ptr()
-                        .add(0 * frame_size + layout.frame_headroom)
-                        as *const u8,
-                    5,
-                )
+                slice::from_raw_parts(umem_region.as_ptr().add(frame_addr(0)) as *const u8, 5)
             },
             b"hello"
         );
 
         assert_eq!(
             unsafe {
-                slice::from_raw_parts(
-                    umem_region
-                        .as_ptr()
-                        .add(1 * frame_size + layout.frame_headroom)
-                        as *const u8,
-                    6,
-                )
+                slice::from_raw_parts(umem_region.as_ptr().add(frame_addr(1)) as *const u8, 6)
             },
             b"world!"
         );
