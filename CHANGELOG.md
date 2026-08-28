@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## Fixed
+
+- `Umem::headroom`, `Umem::headroom_mut`, `Umem::frame` and `Umem::frame_mut`. These now give the frame headroom at the
+  start of the frame, which is where the kernel reserves it. Previously they gave the bytes immediately before the
+  packet, which belong to the XDP program.
+- `Umem::data_mut` and `Umem::frame_mut`. These now allow writes up to the end of the frame rather than the mtu from the
+  packet's start, which are the same thing unless an XDP program has moved the packet. A packet moved forward previously
+  gave a buffer running past the end of the frame.
+- `UmemConfigBuilder::build`. A large frame headroom no longer overflows the check that the two headrooms leave room for
+  packet data. It previously panicked in a debug build and wrapped in a release one, where the config was then accepted.
+
+## Changed
+
+- `UmemConfigBuilder::build` now rejects a frame size that is not a power of two, and a frame headroom leaving no room
+  for packet data. The kernel refuses both when the UMEM is created, so these configs failed before.
+
 ## [0.10.0] - 2026-08-21
 
 ## Added

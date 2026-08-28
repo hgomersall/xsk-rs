@@ -14,13 +14,23 @@ use std::{
 ///
 /// Not to be confused with the [`frame_headroom`] and [`mtu`], the
 /// lengths here describe the amount of data that has been written to
-/// either segment, either by the kernel or by the user. Hence they
-/// vary as frames are used to send and receive data.
+/// either segment. Hence they vary as frames are used to send and
+/// receive data.
 ///
 /// The two sets of values are related however, in that `headroom`
 /// will always be less than or equal to [`frame_headroom`], and
-/// `data` less than or equal to [`mtu`].
+/// `data` less than or equal to [`mtu`] unless an XDP program has
+/// moved the start of the packet.
 ///
+/// Only `data` is ever set from what the kernel reports. There is no
+/// way for it to describe how much of the headroom it wrote, so
+/// `headroom` is reset to zero whenever a descriptor is populated by
+/// the [`RxQueue`] or [`CompQueue`]. The contents of the headroom
+/// survive, so a length known out of band can be restored with
+/// [`Cursor::set_pos`].
+///
+/// [`RxQueue`]: crate::RxQueue
+/// [`CompQueue`]: crate::CompQueue
 /// [`frame_headroom`]: crate::config::UmemConfig::frame_headroom
 /// [`mtu`]: crate::config::UmemConfig::mtu
 #[derive(Debug, Default, Clone, Copy)]
@@ -406,12 +416,20 @@ mod tests {
 
     use crate::umem::{FrameDesc, FrameLayout, UmemRegion, frame::XDP_PKT_CONTD};
 
+    fn test_layout() -> FrameLayout {
+        FrameLayout {
+            xdp_headroom: 256,
+            frame_headroom: 64,
+            mtu: 1728,
+        }
+    }
+
     #[test]
     fn writes_persist() {
         let layout = FrameLayout {
             xdp_headroom: 0,
             frame_headroom: 512,
-            mtu: 2048,
+            mtu: 1536,
         };
 
         let frame_count = 16.try_into().unwrap();
@@ -419,9 +437,11 @@ mod tests {
 
         let umem_region = UmemRegion::new(frame_count, layout, false).unwrap();
 
-        let mut desc_0 = FrameDesc::new(0 * frame_size + layout.frame_headroom);
+        let frame_addr = |i: usize| i * frame_size + layout.frame_headroom;
 
-        let mut desc_1 = FrameDesc::new(1 * frame_size + layout.frame_headroom);
+        let mut desc_0 = FrameDesc::new(frame_addr(0));
+
+        let mut desc_1 = FrameDesc::new(frame_addr(1));
 
         let mut xdp_desc = xdp_desc {
             addr: 0,
@@ -436,10 +456,7 @@ mod tests {
 
         desc_0.write_xdp_desc(&mut xdp_desc);
 
-        assert_eq!(
-            xdp_desc.addr,
-            (0 * frame_size + layout.frame_headroom) as u64
-        );
+        assert_eq!(xdp_desc.addr, frame_addr(0) as u64);
         assert_eq!(xdp_desc.len, 5);
         assert_eq!(xdp_desc.options, 0);
 
@@ -450,35 +467,20 @@ mod tests {
 
         desc_1.write_xdp_desc(&mut xdp_desc);
 
-        assert_eq!(
-            xdp_desc.addr,
-            (1 * frame_size + layout.frame_headroom) as u64
-        );
+        assert_eq!(xdp_desc.addr, frame_addr(1) as u64);
         assert_eq!(xdp_desc.len, 6);
         assert_eq!(xdp_desc.options, 0);
 
         assert_eq!(
             unsafe {
-                slice::from_raw_parts(
-                    umem_region
-                        .as_ptr()
-                        .add(0 * frame_size + layout.frame_headroom)
-                        as *const u8,
-                    5,
-                )
+                slice::from_raw_parts(umem_region.as_ptr().add(frame_addr(0)) as *const u8, 5)
             },
             b"hello"
         );
 
         assert_eq!(
             unsafe {
-                slice::from_raw_parts(
-                    umem_region
-                        .as_ptr()
-                        .add(1 * frame_size + layout.frame_headroom)
-                        as *const u8,
-                    6,
-                )
+                slice::from_raw_parts(umem_region.as_ptr().add(frame_addr(1)) as *const u8, 6)
             },
             b"world!"
         );
@@ -511,25 +513,179 @@ mod tests {
     }
 
     #[test]
+    fn headroom_starts_at_the_frame_start() {
+        let layout = test_layout();
+
+        let frame_size = layout.frame_size();
+        let umem_region = UmemRegion::new(2.try_into().unwrap(), layout, false).unwrap();
+
+        let mut desc = FrameDesc::new(frame_size + layout.xdp_headroom + layout.frame_headroom);
+
+        unsafe { umem_region.headroom_mut(&mut desc) }
+            .cursor()
+            .write_all(b"metadata")
+            .unwrap();
+
+        let region =
+            unsafe { slice::from_raw_parts(umem_region.as_ptr() as *const u8, umem_region.len()) };
+
+        assert_eq!(&region[frame_size..frame_size + 8], b"metadata");
+    }
+
+    #[test]
+    fn headroom_starts_at_the_frame_start_when_the_address_has_shifted() {
+        let layout = test_layout();
+
+        let frame_size = layout.frame_size();
+        let umem_region = UmemRegion::new(2.try_into().unwrap(), layout, false).unwrap();
+
+        let shift = 128;
+        let mut desc =
+            FrameDesc::new(frame_size + layout.xdp_headroom + layout.frame_headroom - shift);
+
+        unsafe { umem_region.headroom_mut(&mut desc) }
+            .cursor()
+            .write_all(b"metadata")
+            .unwrap();
+
+        let region =
+            unsafe { slice::from_raw_parts(umem_region.as_ptr() as *const u8, umem_region.len()) };
+
+        assert_eq!(&region[frame_size..frame_size + 8], b"metadata");
+    }
+
+    #[test]
+    fn headroom_stops_at_the_packet_when_the_address_is_inside_the_frame_headroom() {
+        let layout = test_layout();
+
+        let umem_region = UmemRegion::new(2.try_into().unwrap(), layout, false).unwrap();
+
+        let shift = 16;
+        let mut desc = FrameDesc::new(layout.frame_size() + shift);
+
+        let (mut headroom, mut data) = unsafe { umem_region.frame_mut(&mut desc) };
+
+        assert_eq!(headroom.cursor().buf_len(), shift);
+        assert_eq!(data.cursor().buf_len(), layout.frame_size() - shift);
+
+        assert_eq!(
+            unsafe { umem_region.headroom_mut(&mut desc) }
+                .cursor()
+                .buf_len(),
+            shift
+        );
+    }
+
+    #[test]
+    fn headroom_is_empty_for_a_default_descriptor() {
+        let layout = test_layout();
+
+        let umem_region = UmemRegion::new(2.try_into().unwrap(), layout, false).unwrap();
+
+        let mut desc = FrameDesc::default();
+
+        let (mut headroom, mut data) = unsafe { umem_region.frame_mut(&mut desc) };
+
+        assert_eq!(headroom.cursor().buf_len(), 0);
+        assert_eq!(data.cursor().buf_len(), layout.frame_size());
+
+        assert_eq!(
+            unsafe { umem_region.headroom_mut(&mut desc) }
+                .cursor()
+                .buf_len(),
+            0
+        );
+    }
+
+    #[test]
+    fn data_buffer_is_the_mtu_when_the_address_is_unshifted() {
+        let layout = test_layout();
+
+        let frame_size = layout.frame_size();
+        let umem_region = UmemRegion::new(2.try_into().unwrap(), layout, false).unwrap();
+
+        let mut desc = FrameDesc::new(frame_size + layout.xdp_headroom + layout.frame_headroom);
+
+        let mut data = unsafe { umem_region.data_mut(&mut desc) };
+
+        assert_eq!(data.cursor().buf_len(), layout.mtu);
+    }
+
+    #[test]
+    fn data_buffer_extends_to_the_frame_end_when_the_address_has_shifted_back() {
+        let layout = test_layout();
+
+        let frame_size = layout.frame_size();
+        let umem_region = UmemRegion::new(2.try_into().unwrap(), layout, false).unwrap();
+
+        let shift = 128;
+        let mut desc =
+            FrameDesc::new(frame_size + layout.xdp_headroom + layout.frame_headroom - shift);
+
+        let mut data = unsafe { umem_region.data_mut(&mut desc) };
+
+        assert_eq!(data.cursor().buf_len(), layout.mtu + shift);
+    }
+
+    #[test]
+    fn data_buffer_ends_at_the_frame_end_when_the_address_has_shifted_forward() {
+        let layout = test_layout();
+
+        let frame_size = layout.frame_size();
+        let umem_region = UmemRegion::new(2.try_into().unwrap(), layout, false).unwrap();
+
+        let shift = 128;
+        let mut desc =
+            FrameDesc::new(frame_size + layout.xdp_headroom + layout.frame_headroom + shift);
+
+        let mut data = unsafe { umem_region.data_mut(&mut desc) };
+
+        assert_eq!(data.cursor().buf_len(), layout.mtu - shift);
+    }
+
+    #[test]
+    fn data_contents_are_not_bounded_by_the_mtu_when_the_address_has_shifted_back() {
+        let layout = test_layout();
+
+        let frame_size = layout.frame_size();
+        let umem_region = UmemRegion::new(2.try_into().unwrap(), layout, false).unwrap();
+
+        let shift = 128;
+        let mut desc =
+            FrameDesc::new(frame_size + layout.xdp_headroom + layout.frame_headroom - shift);
+        desc.lengths.data = layout.mtu + shift;
+
+        // The packet still lies within its frame - what follows is a bounds
+        // check on the descriptor's length, not an out of bounds access.
+        assert!(desc.addr + desc.lengths.data <= 2 * frame_size);
+
+        let data = unsafe { umem_region.data_mut(&mut desc) };
+
+        assert_eq!(data.contents().len(), layout.mtu + shift);
+    }
+
+    #[test]
     fn writes_are_contiguous() {
         let layout = FrameLayout {
             xdp_headroom: 4,
             frame_headroom: 8,
-            mtu: 12,
+            mtu: 20,
         };
 
         let frame_count = 4.try_into().unwrap();
         let umem_region = UmemRegion::new(frame_count, layout, false).unwrap();
 
-        // An arbitrary layout
-        let xdp_headroom_segment = [0, 0, 0, 0];
+        // An arbitrary layout. The frame headroom comes first: the kernel
+        // places the XDP program's headroom between it and the packet data,
+        // so that `bpf_xdp_adjust_head` cannot reach it.
         let frame_headroom_segment = [1, 1, 1, 1, 1, 1, 1, 1];
-        let data_segment = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2];
+        let xdp_headroom_segment = [0, 0, 0, 0];
+        let data_segment = [2; 20];
 
         let mut cursor = io::Cursor::new(Vec::new());
 
-        cursor.write_all(&xdp_headroom_segment).unwrap();
         cursor.write_all(&frame_headroom_segment).unwrap();
+        cursor.write_all(&xdp_headroom_segment).unwrap();
         cursor.write_all(&data_segment).unwrap();
 
         let base_layout: Vec<u8> = cursor.into_inner();

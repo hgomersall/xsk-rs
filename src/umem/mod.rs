@@ -471,6 +471,29 @@ impl FrameLayout {
     fn frame_size(&self) -> usize {
         self.xdp_headroom + self.frame_headroom + self.mtu
     }
+
+    /// The offset from the start of the [`Umem`] of the frame that
+    /// `addr` falls in.
+    ///
+    /// Masking rather than subtracting a fixed offset from `addr`, so
+    /// that a frame is still located correctly when its packet does
+    /// not start where [`Umem::new`] put it - which is the case for
+    /// any frame an XDP program has called `bpf_xdp_adjust_head` on.
+    /// The mask is valid because the kernel only accepts a power of
+    /// two frame size for an aligned UMEM, which is the only kind this
+    /// crate creates, and [`UmemConfigBuilder::build`] rejects
+    /// anything else.
+    ///
+    /// [`UmemConfigBuilder::build`]: crate::config::UmemConfigBuilder::build
+    #[inline]
+    fn frame_start(&self, addr: usize) -> usize {
+        debug_assert!(
+            self.frame_size().is_power_of_two(),
+            "the mask below only finds a frame when the frame size is a power of two"
+        );
+
+        addr & !(self.frame_size() - 1)
+    }
 }
 
 impl From<UmemConfig> for FrameLayout {
@@ -502,5 +525,57 @@ mod tests {
         let layout: FrameLayout = config.into();
 
         assert_eq!(config.frame_size().get() as usize, layout.frame_size())
+    }
+
+    fn test_layout() -> FrameLayout {
+        FrameLayout {
+            xdp_headroom: 256,
+            frame_headroom: 64,
+            mtu: 1728,
+        }
+    }
+
+    #[test]
+    fn frame_start_of_an_address_umem_new_assigns() {
+        let layout = test_layout();
+        let frame_size = layout.frame_size();
+
+        for i in 0..4 {
+            let addr = (i * frame_size) + layout.xdp_headroom + layout.frame_headroom;
+
+            assert_eq!(layout.frame_start(addr), i * frame_size);
+        }
+    }
+
+    #[test]
+    fn frame_start_is_unchanged_when_the_packet_has_been_moved_back() {
+        let layout = test_layout();
+        let frame_size = layout.frame_size();
+
+        // An XDP program can move the packet back as far as
+        // `data_hard_start`, which sits at the end of the frame
+        // headroom, so a shift is never more than the XDP headroom.
+        for i in 0..4 {
+            let addr = (i * frame_size) + layout.xdp_headroom + layout.frame_headroom;
+
+            for shift in 0..=layout.xdp_headroom {
+                assert_eq!(layout.frame_start(addr - shift), i * frame_size);
+            }
+        }
+    }
+
+    #[test]
+    fn frame_start_recovers_the_frame_from_any_address_within_it() {
+        let layout = test_layout();
+        let frame_size = layout.frame_size();
+
+        for i in 0..4 {
+            for offset in 0..frame_size {
+                assert_eq!(
+                    layout.frame_start((i * frame_size) + offset),
+                    i * frame_size
+                );
+            }
+        }
     }
 }

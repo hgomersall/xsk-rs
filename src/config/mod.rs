@@ -65,7 +65,12 @@ impl fmt::Display for QueueSizeError {
 impl error::Error for QueueSizeError {}
 
 /// The size of a [`Umem`](crate::umem::Umem) frame. Cannot be smaller
-/// than [`XDP_UMEM_MIN_CHUNK_SIZE`].
+/// than [`XDP_UMEM_MIN_CHUNK_SIZE`], and must be a power of two.
+///
+/// Only the lower bound is checked here. The power of two requirement
+/// is one the kernel places on an aligned UMEM, so it is checked when
+/// the rest of the config is, by
+/// [`UmemConfigBuilder::build`](crate::config::UmemConfigBuilder::build).
 #[derive(Debug, Clone, Copy)]
 pub struct FrameSize(u32);
 
