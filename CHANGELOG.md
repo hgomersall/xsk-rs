@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.11.0] - 2026-08-28
+
 ## Fixed
 
 - `Umem::headroom`, `Umem::headroom_mut`, `Umem::frame` and `Umem::frame_mut`. These now give the frame headroom at the
