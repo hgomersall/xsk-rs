@@ -118,16 +118,18 @@ impl error::Error for FrameSizeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     // Testing the const creation
     const _QUEUE_SIZE_1: QueueSize = {
         match QueueSize::new(1) {
-            Ok(v) => v, Err(_) => panic!("out of range")
+            Ok(v) => v,
+            Err(_) => panic!("out of range"),
         }
     };
     const _FRAME_SIZE_1: FrameSize = {
         match FrameSize::new(XDP_UMEM_MIN_CHUNK_SIZE) {
-            Ok(v) => v, Err(_) => panic!("out of range")
+            Ok(v) => v,
+            Err(_) => panic!("out of range"),
         }
     };
 

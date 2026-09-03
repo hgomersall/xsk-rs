@@ -15,7 +15,6 @@ pub struct ConfigBuilder {
 }
 
 impl ConfigBuilder {
-
     /// Creates a new [`UmemConfigBuilder`](ConfigBuilder) instance.
     pub const fn new() -> Self {
         ConfigBuilder {
@@ -107,23 +106,23 @@ pub struct Config {
 }
 
 impl Config {
-
     const fn new_default() -> Config {
-
         const DEFAULT_FRAME_SIZE: FrameSize = match FrameSize::new(XSK_UMEM__DEFAULT_FRAME_SIZE) {
             Ok(frame_size) => frame_size,
             Err(_) => panic!("Invalid default frame size"),
         };
 
-        const DEFAULT_FILL_QUEUE_SIZE: QueueSize = match QueueSize::new(XSK_RING_PROD__DEFAULT_NUM_DESCS) {
-            Ok(fill_queue_size) => fill_queue_size,
-            Err(_) => panic!("Invalid default fill queue size"),
-        };
+        const DEFAULT_FILL_QUEUE_SIZE: QueueSize =
+            match QueueSize::new(XSK_RING_PROD__DEFAULT_NUM_DESCS) {
+                Ok(fill_queue_size) => fill_queue_size,
+                Err(_) => panic!("Invalid default fill queue size"),
+            };
 
-        const DEFAULT_COMP_QUEUE_SIZE: QueueSize = match QueueSize::new(XSK_RING_CONS__DEFAULT_NUM_DESCS) {
-            Ok(comp_queue_size) => comp_queue_size,
-            Err(_) => panic!("Invalid default completion queue size"),
-        };
+        const DEFAULT_COMP_QUEUE_SIZE: QueueSize =
+            match QueueSize::new(XSK_RING_CONS__DEFAULT_NUM_DESCS) {
+                Ok(comp_queue_size) => comp_queue_size,
+                Err(_) => panic!("Invalid default completion queue size"),
+            };
 
         Config {
             frame_size: DEFAULT_FRAME_SIZE,
